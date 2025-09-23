@@ -1,0 +1,54 @@
+# Xcode
+.DS_Store
+*/build/*
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+profile
+*.moved-aside
+DerivedData
+.idea/
+
+# Swift Package Manager
+.build/
+Packages/
+
+# macOS
+.DS_Store?
+Icon?
+.Trash
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.VolumeIcon.icns
+
+# Testing
+*.coverage
+.nyc_output
+coverage/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Development
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
