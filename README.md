@@ -41,7 +41,7 @@ FastRecord 是一款简洁高效的 macOS 屏幕录制工具，专为快速录�
 ### 安装方法
 
 #### 方法一：下载预编译版本
-1. 从 [Releases](https://github.com/nolangz/FastRecord/releases) 页面下载最新的 DMG 文件
+1. 从项目页面下载最新的 DMG 文件
 2. 打开 DMG 文件，将 FastRecord 拖入应用程序文件夹
 3. 首次打开时，右键点击并选择「打开」
 
