@@ -9,12 +9,14 @@ class AVAudioEngineRecorder: NSObject {
     private var audioFile: AVAudioFile?
     private var audioWriterInput: AVAssetWriterInput?
     private var isRecording = false
-    
+
     // 音频缓冲区管理
     private let audioQueue = DispatchQueue(label: "com.screenrecorder.audioengine", qos: .userInteractive)
     private var startTime: CMTime?
     private var audioFormat: AVAudioFormat?
     private var sampleCount: Int64 = 0  // 音频样本计数器
+    private var firstSampleTime: AVAudioTime?  // 记录第一个样本的时间
+    private var sessionStartTime: CMTime = .zero  // 录制会话开始时间
     
     // MARK: - 初始化
     override init() {
@@ -83,11 +85,13 @@ class AVAudioEngineRecorder: NSObject {
               let inputNode = inputNode else {
             throw RecordingError.audioSetupFailed
         }
-        
+
         self.audioWriterInput = writerInput
         self.isRecording = true
         self.startTime = nil
         self.sampleCount = 0  // 重置样本计数器
+        self.firstSampleTime = nil  // 重置第一个样本时间
+        self.sessionStartTime = .zero  // 重置会话开始时间
         
         // 安装音频tap来捕获音频数据
         let format = inputNode.outputFormat(forBus: 0)
@@ -104,12 +108,13 @@ class AVAudioEngineRecorder: NSObject {
         print("✅ AVAudioEngine 开始录制")
     }
     
-    // MARK: - 停止录制  
+    // MARK: - 停止录制
     func stopRecording() {
         guard let engine = audioEngine else { return }
-        
+
         isRecording = false
         sampleCount = 0  // 重置样本计数器
+        firstSampleTime = nil  // 重置第一个样本时间
         
         // 移除音频tap
         inputNode?.removeTap(onBus: 0)
@@ -148,19 +153,33 @@ class AVAudioEngineRecorder: NSObject {
     // MARK: - 创建CMSampleBuffer
     private func createSampleBuffer(from audioBuffer: AVAudioPCMBuffer, time: AVAudioTime) -> CMSampleBuffer? {
         let audioFormat = audioBuffer.format
-        
-        // 使用基于样本的时间戳，与视频流保持同步
         let frameLength = Int64(audioBuffer.frameLength)
         let sampleRate = audioFormat.sampleRate
-        
-        // 计算当前样本的时间戳（从0开始）
-        let presentationTime = CMTime(
-            value: sampleCount,
-            timescale: CMTimeScale(sampleRate)
-        )
-        
-        // 更新样本计数器
+
+        // 记录第一个样本的时间，用于后续计算相对时间
+        if firstSampleTime == nil {
+            firstSampleTime = time
+            print("🎤 音频录制开始，首个样本时间: \(time.hostTime)")
+        }
+
+        // 计算相对于第一个样本的时间偏移（使用主机时间）
+        guard let firstTime = firstSampleTime else { return nil }
+
+        // 使用AVAudioTime的hostTime计算精确的时间差
+        let hostTimeDiff = time.hostTime - firstTime.hostTime
+        let hostTimeFrequency = CVGetHostClockFrequency()
+        let seconds = Double(hostTimeDiff) / hostTimeFrequency
+
+        // 创建基于实际时间差的时间戳，确保与视频同步
+        let presentationTime = CMTime(seconds: seconds, preferredTimescale: CMTimeScale(sampleRate))
+
+        // 更新样本计数器（用于调试）
         sampleCount += frameLength
+
+        // 每秒打印一次调试信息
+        if sampleCount % Int64(sampleRate) < frameLength {
+            print("🎵 音频时间戳: \(String(format: "%.3f", seconds))秒, 样本数: \(sampleCount)")
+        }
         
         // 创建音频格式描述
         var formatDescription: CMAudioFormatDescription?

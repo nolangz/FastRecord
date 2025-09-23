@@ -11,15 +11,16 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var videoWriterInput: AVAssetWriterInput?
     private var videoWriter: AVAssetWriter?
     private var pixelBufferAdapter: AVAssetWriterInputPixelBufferAdaptor?
-    
+
     // 音频录制组件
     private var audioWriterInput: AVAssetWriterInput?
     private var microphoneWriterInput: AVAssetWriterInput?  // macOS 15+ 独立麦克风轨道
     private var avAudioEngineRecorder: AVAudioEngineRecorder?  // AVAudioEngine录制器
-    
+
     private var recordingStartTime: CMTime = .zero
     private var frameCount: Int64 = 0
     private var audioStartOffset: CMTime? = nil  // 音频开始时间偏移
+    private var firstVideoFrameTime: CMTime?  // 记录第一帧视频的时间戳
     
     // 录制配置
     private var outputURL: URL?
@@ -147,7 +148,8 @@ class ScreenRecorder: NSObject, ObservableObject {
         isRecording = false
         frameCount = 0
         audioStartOffset = nil  // 重置音频时间偏移
-        
+        firstVideoFrameTime = nil  // 重置首帧视频时间
+
         print("✅ 屏幕录制已停止")
     }
     
@@ -655,33 +657,36 @@ extension ScreenRecorder {
               writer.status == .writing else {
             return
         }
-        
+
         // 获取图像缓冲
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return
         }
-        
+
+        // 获取当前帧的原始时间戳
+        let currentFrameTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
         // 设置录制开始时间（只设置一次）
-        if recordingStartTime == .zero && frameCount == 0 {
-            recordingStartTime = .zero  // 从0开始，而不是使用系统时间戳
+        if firstVideoFrameTime == nil {
+            firstVideoFrameTime = currentFrameTime
+            recordingStartTime = .zero
             writer.startSession(atSourceTime: recordingStartTime)
-            print("🎬 录制会话开始，从时间0开始")
+            print("🎬 录制会话开始，首帧时间: \(CMTimeGetSeconds(currentFrameTime))秒")
         }
-        
-        // 使用基于帧数的时间戳，确保时长正确
-        let frameTime = CMTime(value: frameCount, timescale: 30) // 30fps
-        
+
+        // 计算相对于第一帧的时间差，使用实际时间戳
+        guard let firstTime = firstVideoFrameTime else { return }
+        let relativeTime = CMTimeSubtract(currentFrameTime, firstTime)
+
         // 调试输出
-        if frameCount % 30 == 0 { // 每秒打印一次 (30fps)
-            let seconds = CMTimeGetSeconds(frameTime)
-            print("🎬 录制帧 \(frameCount): \(String(format: "%.2f", seconds))秒")
+        if frameCount % 30 == 0 { // 每秒打印一次
+            let seconds = CMTimeGetSeconds(relativeTime)
+            print("🎬 视频帧 \(frameCount): \(String(format: "%.3f", seconds))秒")
         }
-        
-        // 直接使用原始像素缓冲（摄像头会作为屏幕上的窗口被录制）
-        
+
         // 写入帧数据
         if writerInput.isReadyForMoreMediaData {
-            let success = adapter.append(pixelBuffer, withPresentationTime: frameTime)
+            let success = adapter.append(pixelBuffer, withPresentationTime: relativeTime)
             if success {
                 frameCount += 1
             } else {
