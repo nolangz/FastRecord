@@ -467,8 +467,8 @@ class ScreenRecorder: NSObject, ObservableObject {
             try FileManager.default.removeItem(at: outputURL)
         }
         
-        // 创建视频写入器
-        videoWriter = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        // 创建视频写入器（使用 .mov 以便后续混音和兼容性更好）
+        videoWriter = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         
         guard let writer = videoWriter else {
             throw RecordingError.writerSetupFailed
@@ -572,6 +572,11 @@ class ScreenRecorder: NSObject, ObservableObject {
                 let fileSize = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
                 print("📄 文件大小: \(fileSize ?? 0) bytes")
             }
+
+            // 录制完成后对音频进行双声道混音处理（系统音频1/2通道 + 麦克风3通道 -> 2通道）
+            if let url = outputURL {
+                await mixDownAudioToStereoIfNeeded(for: url)
+            }
         case .failed:
             print("❌ 视频文件保存失败: \(writer.error?.localizedDescription ?? "未知错误")")
         case .cancelled:
@@ -586,6 +591,94 @@ class ScreenRecorder: NSObject, ObservableObject {
         audioWriterInput = nil
         microphoneWriterInput = nil
         pixelBufferAdapter = nil
+    }
+
+    // MARK: - 录制后音频混音（下混为双声道）
+    private func mixDownAudioToStereoIfNeeded(for inputURL: URL) async {
+        let asset = AVURLAsset(url: inputURL)
+        let audioTracks = asset.tracks(withMediaType: .audio)
+
+        // 若没有音频或只有一个音轨则无需混音
+        guard audioTracks.count >= 2 else {
+            print("ℹ️  音频轨道少于2条，无需混音")
+            return
+        }
+
+        // 构建合成：保留原视频，叠加所有音频轨道并使用 AVAudioMix 进行混音
+        let composition = AVMutableComposition()
+        // 视频轨道（尽量原样拷贝，避免重编码）
+        if let videoTrack = asset.tracks(withMediaType: .video).first {
+            let compVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+            do {
+                try compVideo?.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
+                                               of: videoTrack,
+                                               at: .zero)
+            } catch {
+                print("⚠️  插入视频轨道失败: \(error)")
+            }
+        }
+
+        // 音频轨道：全部添加到合成，并在导出时通过 AudioMix 同步混合
+        var mixParams: [AVAudioMixInputParameters] = []
+        for track in audioTracks {
+            let compAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            do {
+                try compAudio?.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration),
+                                               of: track,
+                                               at: .zero)
+                let params = AVMutableAudioMixInputParameters(track: compAudio)
+                // 默认音量 1.0；如需调整麦克风电平可在此区分 source track 设置不同 volume
+                params.setVolume(1.0, at: .zero)
+                mixParams.append(params)
+            } catch {
+                print("⚠️  插入音频轨道失败: \(error)")
+            }
+        }
+
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = mixParams
+
+        // 导出到临时文件，再覆盖源文件
+        let tempURL = inputURL.deletingPathExtension().appendingPathExtension("mixed.mov")
+        // 删除已有的临时文件
+        if FileManager.default.fileExists(atPath: tempURL.path) {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            print("❌ 创建导出会话失败，无法进行混音")
+            return
+        }
+        exporter.outputURL = tempURL
+        exporter.outputFileType = .mov
+        exporter.audioMix = audioMix
+        exporter.shouldOptimizeForNetworkUse = false
+
+        print("🎛️  开始导出混音文件...")
+        let status = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            exporter.exportAsynchronously {
+                continuation.resume(returning: exporter.status == .completed)
+            }
+        }
+
+        if status {
+            print("✅ 混音导出完成: \(tempURL.lastPathComponent)")
+            do {
+                // 用混音后的文件覆盖原文件
+                // 先移除原文件（避免 replaceItemAt 权限问题）
+                if FileManager.default.fileExists(atPath: inputURL.path) {
+                    try FileManager.default.removeItem(at: inputURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: inputURL)
+                print("✅ 已替换为混音后双声道音频的文件")
+            } catch {
+                print("❌ 替换混音文件失败: \(error)")
+            }
+        } else {
+            print("❌ 混音导出失败: \(exporter.error?.localizedDescription ?? "未知错误")")
+            // 清理临时文件
+            try? FileManager.default.removeItem(at: tempURL)
+        }
     }
     
     // MARK: - 区域保存和恢复
