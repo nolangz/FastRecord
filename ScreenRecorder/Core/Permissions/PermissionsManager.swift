@@ -1,6 +1,8 @@
 import Foundation
 import AVFoundation
 import ScreenCaptureKit
+import CoreGraphics
+import AppKit
 
 @MainActor
 class PermissionsManager: ObservableObject {
@@ -32,14 +34,22 @@ class PermissionsManager: ObservableObject {
     // MARK: - 屏幕录制权限
     func checkScreenRecordingPermission() async {
         if #available(macOS 12.3, *) {
+            let preflightGranted = CGPreflightScreenCaptureAccess()
+            print("📺 CoreGraphics 屏幕录制预检: \(preflightGranted ? "已授权" : "未授权")")
+
+            guard preflightGranted else {
+                screenRecordingAuthorized = false
+                return
+            }
+
             do {
-                // 尝试获取屏幕内容来检查权限
+                // 尝试获取屏幕内容来验证 ScreenCaptureKit 在当前系统上的实际可用性。
                 let availableContent = try await SCShareableContent.excludingDesktopWindows(
-                    false, 
+                    false,
                     onScreenWindowsOnly: true
                 )
                 screenRecordingAuthorized = !availableContent.displays.isEmpty
-                print("📺 屏幕录制权限: \(screenRecordingAuthorized ? "已授权" : "未授权")")
+                print("📺 ScreenCaptureKit 屏幕录制权限: \(screenRecordingAuthorized ? "已授权" : "未授权")")
                 
                 if screenRecordingAuthorized {
                     print("📺 发现 \(availableContent.displays.count) 个显示器")
@@ -61,18 +71,45 @@ class PermissionsManager: ObservableObject {
     
     func requestScreenRecordingPermission() async {
         print("📺 请求屏幕录制权限...")
+        guard #available(macOS 12.3, *) else {
+            screenRecordingAuthorized = false
+            print("⚠️  系统版本过低，不支持ScreenCaptureKit")
+            return
+        }
+
+        if CGPreflightScreenCaptureAccess() {
+            await checkScreenRecordingPermission()
+            return
+        }
+
+        let grantedFromPrompt = CGRequestScreenCaptureAccess()
+        print("📺 屏幕录制权限请求结果: \(grantedFromPrompt ? "已授权" : "未立即授权")")
+
+        // TCC 状态更新可能略有延迟，尤其是在 macOS 26 的系统设置跳转流程中。
+        try? await Task.sleep(nanoseconds: 500_000_000)
         await checkScreenRecordingPermission()
         
         if !screenRecordingAuthorized {
-            // 如果权限未授权，引导用户到系统设置
+            // 如果权限未授权，引导用户到系统设置。
             openScreenRecordingSettings()
         }
     }
     
     private func openScreenRecordingSettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
-        NSWorkspace.shared.open(url)
-        print("🔗 已打开系统设置 - 屏幕录制权限")
+        let urls = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording"
+        ]
+
+        for rawURL in urls {
+            guard let url = URL(string: rawURL) else { continue }
+            if NSWorkspace.shared.open(url) {
+                print("🔗 已打开系统设置 - 屏幕与系统音频录制权限（macOS 26）/ 屏幕录制权限")
+                return
+            }
+        }
+
+        print("⚠️  无法自动打开系统设置，请手动前往 隐私与安全性 > 屏幕与系统音频录制")
     }
     
     // MARK: - 麦克风权限
