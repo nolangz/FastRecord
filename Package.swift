@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "FastRecord",
     platforms: [
-        .macOS(.v13) // ScreenCaptureKit需要macOS 12.3+，我们设置13以获得更好的SwiftUI支持
+        .macOS(.v13) // ScreenCaptureKit 需要 macOS 12.3+；macOS 26 通过签名 .app 包适配权限/TCC 行为
     ],
     products: [
         .executable(

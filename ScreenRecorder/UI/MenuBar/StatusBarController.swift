@@ -17,10 +17,13 @@ class StatusBarController: ObservableObject {
     
     var permissionsManager: PermissionsManager?
     
-    init() {
+    init(permissionsManager: PermissionsManager? = nil) {
         print("🔧 初始化状态栏控制器...")
+        self.permissionsManager = permissionsManager
         
-        statusBar = NSStatusBar()
+        // 使用系统级状态栏实例。macOS 26 对菜单栏额外项的进程/应用身份
+        // 更严格，NSStatusBar.system 能确保图标注册到当前应用的菜单栏空间。
+        statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
         popover = NSPopover()
         recordingState = RecordingState()

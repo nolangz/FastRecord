@@ -22,7 +22,8 @@ FastRecord 是一款简洁高效的 macOS 屏幕录制工具，专为快速录�
 
 ### 🔒 权限管理
 - **自动权限检查** - 启动时检查所有必要权限
-- **智能权限请求** - 缺少权限时引导用户授权
+- **智能权限请求** - 使用系统屏幕录制授权 API 请求权限，缺少权限时引导用户授权
+- **macOS 26 适配** - 使用签名 `.app` 包身份申请「屏幕与系统音频录制」权限，避免裸可执行文件不显示在系统设置列表中
 - **权限状态显示** - 实时显示权限授权状态
 
 ### 🖱️ 用户界面
@@ -34,7 +35,7 @@ FastRecord 是一款简洁高效的 macOS 屏幕录制工具，专为快速录�
 ## 🚀 快速开始
 
 ### 系统要求
-- macOS 13.0 或更高版本
+- macOS 13.0 或更高版本（已适配 macOS 26 Tahoe）
 - 支持 Intel 和 Apple Silicon Mac
 - 4GB 内存（建议 8GB 以获得最佳性能）
 
@@ -51,11 +52,11 @@ FastRecord 是一款简洁高效的 macOS 屏幕录制工具，专为快速录�
 git clone https://github.com/nolangz/FastRecord.git
 cd FastRecord
 
-# 使用 Swift Package Manager 构建
-swift build -c release
+# 构建并打包为 .app/.dmg（macOS 26 推荐方式）
+./create_fastrecord_dmg.sh
 
-# 运行应用
-./.build/release/FastRecord
+# 安装后从 /Applications 启动 FastRecord.app
+open /Applications/FastRecord.app
 ```
 
 
@@ -108,7 +109,7 @@ FastRecord/
 ## 🔧 开发指南
 
 ### 环境配置
-- Xcode 15.0+
+- Xcode 15.0+（macOS 26 建议使用 Xcode 26 或更新版本构建）
 - Swift 5.9+
 - macOS SDK 13.0+
 
@@ -149,3 +150,9 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 ---
 
 **FastRecord** - 让屏幕录制变得简单 🎬
+
+## 🍎 macOS 26 Tahoe 兼容说明
+
+- macOS 26 的隐私设置将屏幕录制相关项目展示为「屏幕与系统音频录制」。FastRecord 现在通过 CoreGraphics 授权 API 触发系统权限流程，并在未授权时跳转到对应设置页。
+- 请使用 `./create_fastrecord_dmg.sh` 生成并安装 `FastRecord.app`。不要直接运行 `.build/release/FastRecord` 裸可执行文件；macOS 26.1 及更新版本可能不会把裸可执行文件稳定显示在权限列表中。
+- 发布给其他用户时建议设置稳定的 Developer ID 签名：`CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./create_fastrecord_dmg.sh`。未设置时脚本会使用 ad-hoc 签名，仅适合本机测试。
