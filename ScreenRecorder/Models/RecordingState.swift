@@ -8,11 +8,24 @@ enum RecordingMode {
     case selectedArea(CGRect)
 }
 
-enum CameraOverlayPosition {
+enum CameraOverlayPosition: CaseIterable, Hashable {
     case topLeft
     case topRight
     case bottomLeft
     case bottomRight
+
+    var displayName: String {
+        switch self {
+        case .topLeft:
+            return "左上"
+        case .topRight:
+            return "右上"
+        case .bottomLeft:
+            return "左下"
+        case .bottomRight:
+            return "右下"
+        }
+    }
 }
 
 enum CameraOverlaySize: CaseIterable {

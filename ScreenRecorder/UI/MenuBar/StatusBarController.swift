@@ -14,6 +14,9 @@ class StatusBarController: ObservableObject {
     private var circularCameraWindow: CircularCameraWindow?
     private var recordingIndicator: RecordingIndicatorWindow?
     private var audioManager: AudioManager
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var popoverCloseObserver: NSObjectProtocol?
     
     var permissionsManager: PermissionsManager?
     
@@ -53,7 +56,7 @@ class StatusBarController: ObservableObject {
     }
     
     private func setupPopover() {
-        popover.contentSize = NSSize(width: 300, height: 400)
+        popover.contentSize = NSSize(width: 320, height: 410)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: MenuBarView(
@@ -71,6 +74,15 @@ class StatusBarController: ObservableObject {
                 }
             )
         )
+        popoverCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSPopover.didCloseNotification,
+            object: popover,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.stopDismissEventMonitoring()
+            }
+        }
         
         print("🎛️  状态栏弹出菜单设置完成")
     }
@@ -164,7 +176,11 @@ class StatusBarController: ObservableObject {
     }
     
     private func showPopover(_ sender: NSStatusBarButton) {
+        Task {
+            await permissionsManager?.checkAllPermissions()
+        }
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        startDismissEventMonitoring()
         print("📋 显示状态栏菜单")
     }
 
@@ -176,7 +192,61 @@ class StatusBarController: ObservableObject {
     
     private func hidePopover() {
         popover.performClose(nil)
+        stopDismissEventMonitoring()
         print("📋 隐藏状态栏菜单")
+    }
+
+    private func startDismissEventMonitoring() {
+        stopDismissEventMonitoring()
+
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            Task { @MainActor in
+                self?.hidePopoverIfClickIsOutside(event: event)
+            }
+            return event
+        }
+
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                self?.hidePopover()
+            }
+        }
+    }
+
+    private func stopDismissEventMonitoring() {
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
+        }
+
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+    }
+
+    private func hidePopoverIfClickIsOutside(event: NSEvent) {
+        guard popover.isShown else {
+            stopDismissEventMonitoring()
+            return
+        }
+
+        let screenPoint: NSPoint
+        if let eventWindow = event.window {
+            screenPoint = eventWindow.convertPoint(toScreen: event.locationInWindow)
+        } else {
+            screenPoint = event.locationInWindow
+        }
+
+        if popover.contentViewController?.view.window?.frame.contains(screenPoint) == true {
+            return
+        }
+
+        if statusItem.button?.window?.frame.contains(screenPoint) == true {
+            return
+        }
+
+        hidePopover()
     }
     
     private func updateStatusIcon() {
@@ -349,44 +419,75 @@ struct MenuBarView: View {
     let onSelectArea: () -> Void
     
     var body: some View {
-        VStack(spacing: 16) {
-            // 标题
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HeaderView(recordingState: recordingState)
+                    
+                    if let permissions = permissionsManager {
+                        PermissionsStatusView(permissionsManager: permissions)
+                    }
+                    
+                    RecordingStatusView(recordingState: recordingState)
+                    
+                    RecordingControlsView(
+                        recordingState: recordingState,
+                        onStartRecording: onStartRecording,
+                        onStopRecording: onStopRecording,
+                        onSelectArea: onSelectArea
+                    )
+                    
+                    SettingsView(recordingState: recordingState, audioManager: audioManager)
+                }
+                .padding(.top, 14)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
+
+            Divider()
+            .padding(.horizontal, 12)
+
+            Button(role: .destructive) {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Label("退出 FastRecord", systemImage: "power")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 12)
+            .padding(.top, 7)
+            .padding(.bottom, 8)
+        }
+        .frame(width: 320, height: 410)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+// MARK: - 头部视图
+struct HeaderView: View {
+    @ObservedObject var recordingState: RecordingState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "video.fill")
+                .font(.headline)
+                .foregroundStyle(recordingState.isRecording ? .red : .accentColor)
+
             Text("FastRecord")
                 .font(.headline)
-                .padding(.top)
-            
-            // 权限状态
-            if let permissions = permissionsManager {
-                PermissionsStatusView(permissionsManager: permissions)
-            }
-            
-            // 录制状态
-            RecordingStatusView(recordingState: recordingState)
-            
-            // 录制控制
-            RecordingControlsView(
-                recordingState: recordingState,
-                onStartRecording: onStartRecording,
-                onStopRecording: onStopRecording,
-                onSelectArea: onSelectArea
-            )
-            
-            // 设置
-            SettingsView(recordingState: recordingState, audioManager: audioManager)
-            
-            Divider()
-            
-            // 退出按钮
-            Button("退出应用") {
-                NSApplication.shared.terminate(nil)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.red)
-            
+
             Spacer()
+
+            Text(recordingState.isRecording ? "录制中" : "待机")
+                .font(.caption)
+                .foregroundStyle(recordingState.isRecording ? .red : .secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
         }
-        .padding()
-        .frame(width: 300, height: 400)
     }
 }
 
@@ -395,44 +496,71 @@ struct PermissionsStatusView: View {
     @ObservedObject var permissionsManager: PermissionsManager
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("权限状态")
-                .font(.subheadline)
-                .fontWeight(.medium)
-            
-            HStack {
-                Image(systemName: permissionsManager.screenRecordingAuthorized ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundColor(permissionsManager.screenRecordingAuthorized ? .green : .red)
-                Text("屏幕录制")
-                Spacer()
-            }
-            
-            HStack {
-                Image(systemName: permissionsManager.microphoneAuthorized ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundColor(permissionsManager.microphoneAuthorized ? .green : .orange)
-                Text("麦克风")
-                Spacer()
-            }
-            
-            HStack {
-                Image(systemName: permissionsManager.cameraAuthorized ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundColor(permissionsManager.cameraAuthorized ? .green : .orange)
-                Text("摄像头")
-                Spacer()
-            }
-            
-            if !permissionsManager.allPermissionsGranted {
-                Button("请求权限") {
+        let missingPermissions = missingPermissions
+
+        if !missingPermissions.isEmpty {
+            HStack(spacing: 6) {
+                Text("缺少权限")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+
+                ForEach(missingPermissions) { permission in
+                    PermissionCompactItem(permission: permission)
+                }
+
+                Spacer(minLength: 4)
+
+                Button("授权") {
                     Task {
                         await permissionsManager.requestAllPermissions()
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
+            .menuSectionStyle()
         }
-        .padding()
-        .background(Color(.controlBackgroundColor))
-        .cornerRadius(8)
+    }
+
+    private var missingPermissions: [MissingPermission] {
+        var permissions: [MissingPermission] = []
+
+        if !permissionsManager.screenRecordingAuthorized {
+            permissions.append(MissingPermission(title: "屏幕", color: .red))
+        }
+        if !permissionsManager.microphoneAuthorized {
+            permissions.append(MissingPermission(title: "麦克风", color: .orange))
+        }
+        if !permissionsManager.cameraAuthorized {
+            permissions.append(MissingPermission(title: "摄像头", color: .orange))
+        }
+
+        return permissions
+    }
+}
+
+private struct MissingPermission: Identifiable {
+    let title: String
+    let color: Color
+
+    var id: String { title }
+}
+
+private struct PermissionCompactItem: View {
+    let permission: MissingPermission
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(permission.color)
+                .imageScale(.small)
+
+            Text(permission.title)
+                .font(.caption)
+        }
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 }
 
@@ -441,23 +569,26 @@ struct RecordingStatusView: View {
     @ObservedObject var recordingState: RecordingState
     
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Circle()
                 .fill(recordingState.isRecording ? .red : .gray)
-                .frame(width: 12, height: 12)
+                .frame(width: 9, height: 9)
             
             Text(recordingState.isRecording ? "录制中" : "未录制")
-                .font(.subheadline)
+                .font(.callout)
             
+            Spacer()
+
             if recordingState.isRecording {
-                Spacer()
                 Text(timeString(from: recordingState.recordingDuration))
-                    .font(.subheadline.monospacedDigit())
+                    .font(.callout.monospacedDigit())
+            } else {
+                Text("准备就绪")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding()
-        .background(Color(.controlBackgroundColor))
-        .cornerRadius(8)
+        .menuSectionStyle()
     }
     
     private func timeString(from duration: TimeInterval) -> String {
@@ -476,29 +607,33 @@ struct RecordingControlsView: View {
     let onSelectArea: () -> Void
     
     var body: some View {
-        VStack(spacing: 12) {
-            // 主要控制按钮
-            if recordingState.isRecording {
-                Button("停止录制") {
-                    onStopRecording()
+        if recordingState.isRecording {
+            Button {
+                onStopRecording()
+            } label: {
+                Label("停止录制", systemImage: "stop.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        } else {
+            HStack(spacing: 8) {
+                Button {
+                    recordingState.recordingMode = .fullScreen
+                    onStartRecording()
+                } label: {
+                    Label("全屏录制", systemImage: "display")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            } else {
-                VStack(spacing: 8) {
-                    HStack(spacing: 12) {
-                        Button("全屏录制") {
-                            recordingState.recordingMode = .fullScreen
-                            onStartRecording()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        
-                        Button("选择区域") {
-                            onSelectArea()
-                        }
-                        .buttonStyle(.bordered)
-                    }
+
+                Button {
+                    onSelectArea()
+                } label: {
+                    Label("选择区域", systemImage: "crop")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
             }
         }
     }
@@ -510,65 +645,102 @@ struct SettingsView: View {
     @ObservedObject var audioManager: AudioManager
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("设置")
                 .font(.subheadline)
-                .fontWeight(.medium)
+                .fontWeight(.semibold)
             
             Toggle("麦克风", isOn: $recordingState.microphoneEnabled)
+                .toggleStyle(.checkbox)
             
-            // 麦克风设备选择
             if recordingState.microphoneEnabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("设备:")
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 7) {
+                        Text("输入设备")
                             .font(.caption)
-                        Picker("麦克风设备", selection: $audioManager.selectedMicrophone) {
+                            .foregroundStyle(.secondary)
+                            .frame(width: 48, alignment: .leading)
+
+                        Picker("", selection: $audioManager.selectedMicrophone) {
                             ForEach(audioManager.availableMicrophones) { device in
                                 Text(device.name).tag(device)
                             }
                         }
+                        .labelsHidden()
                         .pickerStyle(.menu)
                         .disabled(audioManager.isLoading)
+                        .frame(maxWidth: .infinity)
                         
                         if audioManager.isLoading {
                             ProgressView()
-                                .scaleEffect(0.5)
+                                .controlSize(.small)
                         }
                     }
                     
-                    // 显示推荐的音频配置方法
                     let config = audioManager.getRecommendedAudioConfiguration()
                     Text(config.description)
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.leading, 16)
-                .font(.caption)
+                .padding(.leading, 20)
             }
             
             Toggle("系统音频", isOn: $recordingState.systemAudioEnabled)
+                .toggleStyle(.checkbox)
+
             Toggle("摄像头叠加", isOn: $recordingState.cameraOverlayEnabled)
+                .toggleStyle(.checkbox)
             
-            // 摄像头设置
             if recordingState.cameraOverlayEnabled {
-                VStack(alignment: .leading, spacing: 4) {
-                    // 大小选择
-                    HStack {
-                        Text("大小:")
-                        Picker("大小", selection: $recordingState.cameraOverlaySize) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 7) {
+                        Text("位置")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 48, alignment: .leading)
+
+                        Picker("", selection: $recordingState.cameraOverlayPosition) {
+                            ForEach(CameraOverlayPosition.allCases, id: \.self) { position in
+                                Text(position.displayName).tag(position)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text("大小")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 48, alignment: .leading)
+
+                        Picker("", selection: $recordingState.cameraOverlaySize) {
                             ForEach(CameraOverlaySize.allCases, id: \.self) { size in
                                 Text(size.displayName).tag(size)
                             }
                         }
+                        .labelsHidden()
                         .pickerStyle(.segmented)
+                        .frame(maxWidth: .infinity)
                     }
                 }
-                .font(.caption)
+                .padding(.leading, 20)
             }
         }
-        .padding()
-        .background(Color(.controlBackgroundColor))
-        .cornerRadius(8)
+        .menuSectionStyle()
+    }
+}
+
+private extension View {
+    func menuSectionStyle() -> some View {
+        self
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
     }
 }

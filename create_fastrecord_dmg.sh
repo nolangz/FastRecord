@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="FastRecord"
-APP_VERSION="1.0"
+APP_VERSION="2.0"
 BUNDLE_ID="${PRODUCT_BUNDLE_IDENTIFIER:-com.nolangz.fastrecord}"
 DMG_NAME="${APP_NAME}-v${APP_VERSION}.dmg"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
