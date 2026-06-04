@@ -41,6 +41,7 @@ class RecordingIndicatorWindow: NSObject {
         window.hasShadow = false
         window.ignoresMouseEvents = true  // 完全透明给鼠标事件
         window.isReleasedWhenClosed = false
+        window.sharingType = .none
         
         // 创建虚线边框视图
         let contentView = NSHostingView(

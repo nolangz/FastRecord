@@ -18,6 +18,11 @@ class CircularCameraWindow: NSObject {
     var currentWindowSize: NSSize {
         cameraWindow?.frame.size ?? NSSize(width: CameraOverlaySize.medium.size.width, height: CameraOverlaySize.medium.size.height)
     }
+
+    func metadataSnapshot() -> CameraOverlaySnapshot? {
+        guard let window = cameraWindow else { return nil }
+        return CameraOverlaySnapshot(frame: window.frame, shape: cameraShape, size: cameraSize)
+    }
     
     func show(at position: CameraOverlayPosition, size: CameraOverlaySize, shape: CameraOverlayShape, recordingRect: CGRect? = nil) {
         print("🎥 显示摄像头窗口: \(shape.displayName)...")
@@ -51,6 +56,7 @@ class CircularCameraWindow: NSObject {
         window.hasShadow = false
         window.ignoresMouseEvents = false  // 录制时允许鼠标交互
         window.isReleasedWhenClosed = false
+        window.sharingType = .none
         
         // 创建摄像头视图
         let contentView = NSHostingView(
@@ -361,11 +367,10 @@ struct CameraOverlayView: View {
             return
         }
 
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let cropRect = visibleContentRect(in: pixelBuffer, imageExtent: ciImage.extent)
+        let processedImage = CameraFrameProcessor.mirroredVisibleImage(from: pixelBuffer)
 
         if shape == .roundedSquare {
-            let aspectRatio = cropRect.width / max(cropRect.height, 1)
+            let aspectRatio = processedImage.extent.width / max(processedImage.extent.height, 1)
             if aspectRatio.isFinite, aspectRatio > 0 {
                 windowController?.updateAspectRatioIfNeeded(to: aspectRatio)
             }
@@ -373,131 +378,9 @@ struct CameraOverlayView: View {
         
         // 转换CVPixelBuffer到NSImage
         let context = CIContext()
-        let sourceImage = ciImage.cropped(to: cropRect)
-        let normalizedImage = sourceImage.transformed(
-            by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY)
-        )
-        let normalizedExtent = CGRect(origin: .zero, size: cropRect.size)
-
-        // 镜像翻转图像（前置摄像头需要）
-        let flippedImage = normalizedImage.transformed(by: CGAffineTransform(scaleX: -1, y: 1))
-        let translatedImage = flippedImage.transformed(by: CGAffineTransform(translationX: normalizedExtent.width, y: 0))
-        
-        if let cgImage = context.createCGImage(translatedImage, from: normalizedExtent) {
-            currentImage = NSImage(cgImage: cgImage, size: normalizedExtent.size)
+        if let cgImage = context.createCGImage(processedImage.image, from: processedImage.extent) {
+            currentImage = NSImage(cgImage: cgImage, size: processedImage.extent.size)
         }
-    }
-
-    private func visibleContentRect(in pixelBuffer: CVPixelBuffer, imageExtent: CGRect) -> CGRect {
-        guard let detectedRect = detectNonBlackContentRect(in: pixelBuffer) else {
-            return imageExtent
-        }
-
-        let horizontalTrim = detectedRect.minX + imageExtent.width - detectedRect.maxX
-        let verticalTrim = detectedRect.minY + imageExtent.height - detectedRect.maxY
-        let horizontalTrimThreshold = max(2, imageExtent.width * 0.005)
-        let verticalTrimThreshold = max(2, imageExtent.height * 0.005)
-        let hasMeaningfulTrim = horizontalTrim > horizontalTrimThreshold || verticalTrim > verticalTrimThreshold
-
-        guard hasMeaningfulTrim else {
-            return imageExtent
-        }
-
-        return detectedRect.intersection(imageExtent)
-    }
-
-    private func detectNonBlackContentRect(in pixelBuffer: CVPixelBuffer) -> CGRect? {
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        guard width > 0, height > 0 else { return nil }
-        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
-            return CGRect(x: 0, y: 0, width: width, height: height)
-        }
-
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
-
-        let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        let sampleStep = max(1, min(width, height) / 120)
-        let brightnessThreshold = 18
-        let minimumBrightSampleRatio = 0.02
-
-        func isBrightPixel(x: Int, y: Int) -> Bool {
-            let offset = y * bytesPerRow + x * 4
-            let blue = Int(bytes[offset])
-            let green = Int(bytes[offset + 1])
-            let red = Int(bytes[offset + 2])
-            return max(red, green, blue) > brightnessThreshold
-        }
-
-        func rowHasContent(_ y: Int) -> Bool {
-            var brightSamples = 0
-            var totalSamples = 0
-
-            for x in stride(from: 0, to: width, by: sampleStep) {
-                totalSamples += 1
-                if isBrightPixel(x: x, y: y) {
-                    brightSamples += 1
-                }
-            }
-
-            guard totalSamples > 0 else { return false }
-            return Double(brightSamples) / Double(totalSamples) > minimumBrightSampleRatio
-        }
-
-        func columnHasContent(_ x: Int, top: Int, bottom: Int) -> Bool {
-            var brightSamples = 0
-            var totalSamples = 0
-
-            for y in stride(from: top, through: bottom, by: sampleStep) {
-                totalSamples += 1
-                if isBrightPixel(x: x, y: y) {
-                    brightSamples += 1
-                }
-            }
-
-            guard totalSamples > 0 else { return false }
-            return Double(brightSamples) / Double(totalSamples) > minimumBrightSampleRatio
-        }
-
-        var top = 0
-        while top < height && !rowHasContent(top) {
-            top += sampleStep
-        }
-
-        var bottom = height - 1
-        while bottom > top && !rowHasContent(bottom) {
-            bottom -= sampleStep
-        }
-
-        guard top < bottom else {
-            return CGRect(x: 0, y: 0, width: width, height: height)
-        }
-
-        var left = 0
-        while left < width && !columnHasContent(left, top: top, bottom: bottom) {
-            left += sampleStep
-        }
-
-        var right = width - 1
-        while right > left && !columnHasContent(right, top: top, bottom: bottom) {
-            right -= sampleStep
-        }
-
-        guard left < right else {
-            return CGRect(x: 0, y: 0, width: width, height: height)
-        }
-
-        let minX = max(0, left)
-        let minY = max(0, top)
-        let maxX = min(width, right + 1)
-        let maxY = min(height, bottom + 1)
-
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }
 

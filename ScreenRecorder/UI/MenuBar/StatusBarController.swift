@@ -34,6 +34,10 @@ class StatusBarController: ObservableObject {
         screenRecorder = ScreenRecorder()
         recordingIndicator = RecordingIndicatorWindow()
         audioManager = AudioManager()
+
+        screenRecorder.setCameraOverlaySnapshotProvider { [weak self] in
+            self?.circularCameraWindow?.metadataSnapshot()
+        }
         
         setupStatusItem()
         setupPopover()

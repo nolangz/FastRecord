@@ -1,6 +1,39 @@
 import Foundation
 import AVFoundation
+import CoreImage
 import ScreenCaptureKit
+
+private struct CameraOverlayMetadataFile: Codable {
+    let version: Int
+    let screenFile: String
+    let cameraFile: String?
+    let coordinateSpace: String
+    let generatedAt: String
+    let recordingMode: String
+    let recordingRect: CodableRect?
+    let samples: [CameraOverlayMetadataSample]
+}
+
+private struct CameraOverlayMetadataSample: Codable {
+    let time: Double
+    let frame: CodableRect
+    let shape: String
+    let size: String
+}
+
+private struct CodableRect: Codable, Equatable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+
+    init(_ rect: CGRect) {
+        x = rect.origin.x
+        y = rect.origin.y
+        width = rect.width
+        height = rect.height
+    }
+}
 
 @MainActor
 class ScreenRecorder: NSObject, ObservableObject {
@@ -37,6 +70,21 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var enableCameraOverlay = false
     private var cameraOverlayPosition: CameraOverlayPosition = .topRight
     private var cameraOverlaySize: CameraOverlaySize = .medium
+    private var cameraOverlaySnapshotProvider: (() -> CameraOverlaySnapshot?)?
+
+    // 独立摄像头视频轨
+    private var cameraWriter: AVAssetWriter?
+    private var cameraWriterInput: AVAssetWriterInput?
+    private var cameraPixelBufferAdapter: AVAssetWriterInputPixelBufferAdaptor?
+    private var cameraRecordingTask: Task<Void, Never>?
+    private var cameraOutputURL: URL?
+    private var overlayMetadataURL: URL?
+    private var cameraOutputDimensions: (width: Int, height: Int)?
+    private var cameraFrameCount: Int64 = 0
+    private var cameraFirstFrameDate: Date?
+    private var overlayMetadataStartDate: Date?
+    private var overlayMetadataSamples: [CameraOverlayMetadataSample] = []
+    private let cameraCIContext = CIContext()
     
     override init() {
         super.init()
@@ -68,6 +116,10 @@ class ScreenRecorder: NSObject, ObservableObject {
     // MARK: - 获取摄像头管理器
     func getCameraManager() -> CameraManager {
         return cameraManager
+    }
+
+    func setCameraOverlaySnapshotProvider(_ provider: @escaping () -> CameraOverlaySnapshot?) {
+        cameraOverlaySnapshotProvider = provider
     }
     
     // MARK: - 录制控制
@@ -132,7 +184,8 @@ class ScreenRecorder: NSObject, ObservableObject {
             avAudioEngineRecorder = nil
         }
         
-        // 停止摄像头
+        // 停止独立摄像头视频轨，再关闭摄像头采集
+        await stopCameraTrackRecording()
         cameraManager.stopCapture()
         
         // 完成视频写入
@@ -317,6 +370,10 @@ class ScreenRecorder: NSObject, ObservableObject {
         
         // 开始捕获
         try await stream?.startCapture()
+
+        if enableCameraOverlay {
+            startCameraTrackRecording()
+        }
         
         // 启动AVAudioEngine麦克风录制 (仅macOS 13-14)
         if #available(macOS 15.0, *) {
@@ -544,6 +601,298 @@ class ScreenRecorder: NSObject, ObservableObject {
         recordingStartTime = CMTime.zero
         
         print("🎥 视频写入器配置完成")
+    }
+
+    // MARK: - 独立摄像头视频轨
+    private func startCameraTrackRecording() {
+        guard cameraRecordingTask == nil, let outputURL else { return }
+
+        cameraOutputURL = siblingOutputURL(for: outputURL, suffix: "camera", extension: "mov")
+        overlayMetadataURL = siblingOutputURL(for: outputURL, suffix: "overlay", extension: "json")
+        cameraFrameCount = 0
+        cameraFirstFrameDate = nil
+        cameraOutputDimensions = nil
+        overlayMetadataStartDate = nil
+        overlayMetadataSamples = []
+
+        if let cameraOutputURL, FileManager.default.fileExists(atPath: cameraOutputURL.path) {
+            try? FileManager.default.removeItem(at: cameraOutputURL)
+        }
+        if let overlayMetadataURL, FileManager.default.fileExists(atPath: overlayMetadataURL.path) {
+            try? FileManager.default.removeItem(at: overlayMetadataURL)
+        }
+
+        cameraRecordingTask = Task { @MainActor [weak self] in
+            await self?.recordCameraFrames()
+        }
+
+        print("📷 独立摄像头视频轨开始: \(cameraOutputURL?.lastPathComponent ?? "")")
+    }
+
+    private func recordCameraFrames() async {
+        while !Task.isCancelled {
+            if let pixelBuffer = cameraManager.getCurrentFrame() {
+                appendCameraFrame(pixelBuffer)
+            }
+
+            try? await Task.sleep(nanoseconds: 33_333_333)
+        }
+    }
+
+    private func appendCameraFrame(_ pixelBuffer: CVPixelBuffer) {
+        let processedFrame = CameraFrameProcessor.mirroredVisibleImage(from: pixelBuffer)
+
+        do {
+            if cameraWriter == nil {
+                let dimensions = CameraFrameProcessor.evenDimensions(for: processedFrame.extent.size)
+                try setupCameraVideoWriter(width: dimensions.width, height: dimensions.height)
+            }
+        } catch {
+            print("❌ 摄像头视频写入器创建失败: \(error.localizedDescription)")
+            cameraRecordingTask?.cancel()
+            return
+        }
+
+        guard let writer = cameraWriter,
+              let writerInput = cameraWriterInput,
+              let adapter = cameraPixelBufferAdapter,
+              let dimensions = cameraOutputDimensions,
+              writer.status == .writing else {
+            return
+        }
+
+        let currentFrameDate = Date()
+        if cameraFirstFrameDate == nil {
+            cameraFirstFrameDate = currentFrameDate
+            overlayMetadataStartDate = currentFrameDate
+            writer.startSession(atSourceTime: .zero)
+        }
+
+        guard let firstFrameDate = cameraFirstFrameDate else { return }
+
+        if cameraFrameCount % 8 == 0 {
+            captureOverlayMetadataSample()
+        }
+
+        guard writerInput.isReadyForMoreMediaData,
+              let outputPixelBuffer = renderCameraFrame(
+                processedFrame.image,
+                sourceExtent: processedFrame.extent,
+                width: dimensions.width,
+                height: dimensions.height,
+                adapter: adapter
+              ) else {
+            return
+        }
+
+        let presentationTime = CMTime(
+            seconds: currentFrameDate.timeIntervalSince(firstFrameDate),
+            preferredTimescale: 600
+        )
+
+        if adapter.append(outputPixelBuffer, withPresentationTime: presentationTime) {
+            cameraFrameCount += 1
+        } else {
+            print("⚠️  摄像头帧写入失败: \(cameraFrameCount)")
+        }
+    }
+
+    private func setupCameraVideoWriter(width: Int, height: Int) throws {
+        guard let cameraOutputURL else { return }
+
+        cameraWriter = try AVAssetWriter(outputURL: cameraOutputURL, fileType: .mov)
+        guard let writer = cameraWriter else {
+            throw RecordingError.writerSetupFailed
+        }
+
+        let bitRate = max(4_000_000, width * height * 4)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: bitRate,
+                AVVideoMaxKeyFrameIntervalKey: 30,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoAllowFrameReorderingKey: false,
+                AVVideoExpectedSourceFrameRateKey: 30,
+                AVVideoQualityKey: 0.9
+            ]
+        ]
+
+        cameraWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        cameraWriterInput?.expectsMediaDataInRealTime = true
+
+        guard let writerInput = cameraWriterInput, writer.canAdd(writerInput) else {
+            throw RecordingError.writerSetupFailed
+        }
+
+        let pixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
+        ]
+
+        cameraPixelBufferAdapter = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: writerInput,
+            sourcePixelBufferAttributes: pixelBufferAttributes
+        )
+        writer.add(writerInput)
+
+        guard writer.startWriting() else {
+            throw RecordingError.writerSetupFailed
+        }
+
+        cameraOutputDimensions = (width, height)
+        print("📷 摄像头视频写入器配置完成: \(width)x\(height)")
+    }
+
+    private func renderCameraFrame(
+        _ image: CIImage,
+        sourceExtent: CGRect,
+        width: Int,
+        height: Int,
+        adapter: AVAssetWriterInputPixelBufferAdaptor
+    ) -> CVPixelBuffer? {
+        guard let pixelBufferPool = adapter.pixelBufferPool else { return nil }
+
+        var outputPixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &outputPixelBuffer)
+        guard status == kCVReturnSuccess, let outputPixelBuffer else {
+            return nil
+        }
+
+        let outputExtent = CGRect(x: 0, y: 0, width: width, height: height)
+        let scale = CGAffineTransform(
+            scaleX: CGFloat(width) / max(sourceExtent.width, 1),
+            y: CGFloat(height) / max(sourceExtent.height, 1)
+        )
+        let scaledImage = image.transformed(by: scale)
+
+        cameraCIContext.render(
+            scaledImage,
+            to: outputPixelBuffer,
+            bounds: outputExtent,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+
+        return outputPixelBuffer
+    }
+
+    private func stopCameraTrackRecording() async {
+        let task = cameraRecordingTask
+        cameraRecordingTask = nil
+        task?.cancel()
+        await task?.value
+
+        captureOverlayMetadataSample()
+
+        if let writer = cameraWriter {
+            cameraWriterInput?.markAsFinished()
+            await writer.finishWriting()
+
+            switch writer.status {
+            case .completed:
+                print("✅ 摄像头视频保存成功: \(cameraOutputURL?.lastPathComponent ?? "")")
+            case .failed:
+                print("❌ 摄像头视频保存失败: \(writer.error?.localizedDescription ?? "未知错误")")
+            case .cancelled:
+                print("⚠️  摄像头视频写入被取消")
+            default:
+                print("⚠️  摄像头视频写入状态未知: \(writer.status.rawValue)")
+            }
+        }
+
+        writeOverlayMetadataFile()
+
+        cameraWriter = nil
+        cameraWriterInput = nil
+        cameraPixelBufferAdapter = nil
+        cameraOutputDimensions = nil
+        cameraFirstFrameDate = nil
+        overlayMetadataStartDate = nil
+        overlayMetadataSamples = []
+    }
+
+    private func captureOverlayMetadataSample() {
+        guard enableCameraOverlay,
+              let startDate = overlayMetadataStartDate,
+              let snapshot = cameraOverlaySnapshotProvider?() else {
+            return
+        }
+
+        let elapsedTime = Date().timeIntervalSince(startDate)
+        let sample = CameraOverlayMetadataSample(
+            time: elapsedTime,
+            frame: CodableRect(snapshot.frame),
+            shape: metadataValue(for: snapshot.shape),
+            size: metadataValue(for: snapshot.size)
+        )
+
+        if let lastSample = overlayMetadataSamples.last,
+           abs(lastSample.time - sample.time) < 0.2,
+           lastSample.frame == sample.frame,
+           lastSample.shape == sample.shape,
+           lastSample.size == sample.size {
+            return
+        }
+
+        overlayMetadataSamples.append(sample)
+    }
+
+    private func writeOverlayMetadataFile() {
+        guard let overlayMetadataURL, let outputURL else { return }
+
+        let metadata = CameraOverlayMetadataFile(
+            version: 1,
+            screenFile: outputURL.lastPathComponent,
+            cameraFile: cameraOutputURL?.lastPathComponent,
+            coordinateSpace: "macOS global screen points; origin is bottom-left",
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            recordingMode: isFullScreen ? "fullScreen" : "selectedArea",
+            recordingRect: recordingRect.map(CodableRect.init),
+            samples: overlayMetadataSamples
+        )
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(metadata)
+            try data.write(to: overlayMetadataURL)
+            print("✅ 摄像头叠加元数据保存成功: \(overlayMetadataURL.lastPathComponent)")
+        } catch {
+            print("❌ 摄像头叠加元数据保存失败: \(error.localizedDescription)")
+        }
+    }
+
+    private func siblingOutputURL(for outputURL: URL, suffix: String, extension pathExtension: String) -> URL {
+        let baseName = outputURL.deletingPathExtension().lastPathComponent
+        return outputURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(baseName)_\(suffix)")
+            .appendingPathExtension(pathExtension)
+    }
+
+    private func metadataValue(for shape: CameraOverlayShape) -> String {
+        switch shape {
+        case .circle:
+            return "circle"
+        case .roundedSquare:
+            return "roundedRectangle"
+        }
+    }
+
+    private func metadataValue(for size: CameraOverlaySize) -> String {
+        switch size {
+        case .small:
+            return "small"
+        case .medium:
+            return "medium"
+        case .large:
+            return "large"
+        }
     }
     
     // MARK: - 完成视频写入

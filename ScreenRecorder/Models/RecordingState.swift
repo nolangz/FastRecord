@@ -70,6 +70,12 @@ enum CameraOverlayShape: CaseIterable, Hashable {
     }
 }
 
+struct CameraOverlaySnapshot {
+    let frame: CGRect
+    let shape: CameraOverlayShape
+    let size: CameraOverlaySize
+}
+
 @MainActor
 class RecordingState: ObservableObject {
     @Published var isRecording = false
