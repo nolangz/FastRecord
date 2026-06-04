@@ -1123,12 +1123,11 @@ class ScreenRecorder: NSObject, ObservableObject {
             return screenImage.cropped(to: outputExtent)
         }
 
-        let scaledCamera = cameraImage
-            .transformed(by: CGAffineTransform(
-                scaleX: targetRect.width / max(cameraImage.extent.width, 1),
-                y: targetRect.height / max(cameraImage.extent.height, 1)
-            ))
-            .transformed(by: CGAffineTransform(translationX: targetRect.minX, y: targetRect.minY))
+        let scaledCamera = aspectFill(
+            cameraImage,
+            sourceExtent: cameraImage.extent,
+            targetRect: targetRect
+        )
 
         let mask = overlayMask(
             size: targetRect.size,
@@ -1142,6 +1141,25 @@ class ScreenRecorder: NSObject, ObservableObject {
         ])
 
         return blendedImage.cropped(to: outputExtent)
+    }
+
+    private func aspectFill(
+        _ image: CIImage,
+        sourceExtent: CGRect,
+        targetRect: CGRect
+    ) -> CIImage {
+        let scale = max(
+            targetRect.width / max(sourceExtent.width, 1),
+            targetRect.height / max(sourceExtent.height, 1)
+        )
+        let scaledWidth = sourceExtent.width * scale
+        let scaledHeight = sourceExtent.height * scale
+        let translationX = targetRect.midX - scaledWidth / 2 - sourceExtent.minX * scale
+        let translationY = targetRect.midY - scaledHeight / 2 - sourceExtent.minY * scale
+
+        return image
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(translationX: translationX, y: translationY))
     }
 
     private func overlayTargetRect(
