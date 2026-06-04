@@ -80,6 +80,8 @@ class CameraManager: NSObject, ObservableObject {
         guard let device = videoDevice else {
             throw CameraError.deviceNotFound
         }
+
+        configurePreferredFormat(for: device)
         
         // 创建输入
         videoInput = try AVCaptureDeviceInput(device: device)
@@ -171,6 +173,59 @@ class CameraManager: NSObject, ObservableObject {
             mediaType: .video,
             position: .unspecified
         ).devices
+    }
+
+    private func configurePreferredFormat(for device: AVCaptureDevice) {
+        let preferredAspectRatio: CGFloat = 16.0 / 9.0
+        let targetPixels = 1920 * 1080
+
+        let candidates = device.formats.compactMap { format -> (format: AVCaptureDevice.Format, width: Int32, height: Int32, aspectRatio: CGFloat, pixelCount: Int)? in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dimensions.width > 0, dimensions.height > 0 else { return nil }
+
+            let aspectRatio = CGFloat(dimensions.width) / CGFloat(dimensions.height)
+            return (
+                format: format,
+                width: dimensions.width,
+                height: dimensions.height,
+                aspectRatio: aspectRatio,
+                pixelCount: Int(dimensions.width * dimensions.height)
+            )
+        }
+
+        guard let bestFormat = candidates.min(by: { lhs, rhs in
+            let lhsAspectScore = abs(lhs.aspectRatio - preferredAspectRatio)
+            let rhsAspectScore = abs(rhs.aspectRatio - preferredAspectRatio)
+
+            if abs(lhsAspectScore - rhsAspectScore) > 0.01 {
+                return lhsAspectScore < rhsAspectScore
+            }
+
+            let lhsResolutionScore = abs(lhs.pixelCount - targetPixels)
+            let rhsResolutionScore = abs(rhs.pixelCount - targetPixels)
+            return lhsResolutionScore < rhsResolutionScore
+        }) else {
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = bestFormat.format
+
+            let supports30FPS = bestFormat.format.videoSupportedFrameRateRanges.contains { range in
+                range.minFrameRate <= 30 && range.maxFrameRate >= 30
+            }
+
+            if supports30FPS {
+                device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+                device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+            }
+
+            device.unlockForConfiguration()
+            print("📷 使用摄像头格式: \(bestFormat.width)x\(bestFormat.height)")
+        } catch {
+            print("⚠️  摄像头格式配置失败: \(error.localizedDescription)")
+        }
     }
     
     // MARK: - 创建圆形蒙版摄像头画面
