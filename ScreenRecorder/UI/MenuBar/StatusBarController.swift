@@ -63,6 +63,7 @@ class StatusBarController: ObservableObject {
                 recordingState: recordingState,
                 permissionsManager: permissionsManager,
                 audioManager: audioManager,
+                cameraManager: screenRecorder.getCameraManager(),
                 onStartRecording: { [weak self] in
                     self?.startRecording()
                 },
@@ -103,6 +104,13 @@ class StatusBarController: ObservableObject {
                 self?.handleCameraSizeChange(size: size)
             }
             .store(in: &cancellables)
+
+        recordingState.$cameraOverlayShape
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] shape in
+                self?.handleCameraShapeChange(shape: shape)
+            }
+            .store(in: &cancellables)
     }
     
     private var cancellables = Set<AnyCancellable>()
@@ -131,23 +139,23 @@ class StatusBarController: ObservableObject {
                 
                 await MainActor.run {
                     // 显示摄像头窗口
-                    if let cameraManager = screenRecorder.getCameraManager() {
-                        if circularCameraWindow == nil {
-                            circularCameraWindow = CircularCameraWindow(cameraManager: cameraManager)
-                        }
-                        
-                        let recordingRect: CGRect? = if case .selectedArea(let rect) = recordingState.recordingMode { rect } else { nil }
-                        
-                        circularCameraWindow?.show(
-                            at: recordingState.cameraOverlayPosition,
-                            size: recordingState.cameraOverlaySize,
-                            recordingRect: recordingRect
-                        )
-                        
-                        // 确保蓝色指示器在前面显示
-                        if case .selectedArea(_) = recordingState.recordingMode {
-                            recordingIndicator?.bringToFront()
-                        }
+                    let cameraManager = screenRecorder.getCameraManager()
+                    if circularCameraWindow == nil {
+                        circularCameraWindow = CircularCameraWindow(cameraManager: cameraManager)
+                    }
+
+                    let recordingRect: CGRect? = if case .selectedArea(let rect) = recordingState.recordingMode { rect } else { nil }
+
+                    circularCameraWindow?.show(
+                        at: recordingState.cameraOverlayPosition,
+                        size: recordingState.cameraOverlaySize,
+                        shape: recordingState.cameraOverlayShape,
+                        recordingRect: recordingRect
+                    )
+
+                    // 确保蓝色指示器在前面显示
+                    if case .selectedArea(_) = recordingState.recordingMode {
+                        recordingIndicator?.bringToFront()
                     }
                 }
             }
@@ -164,6 +172,13 @@ class StatusBarController: ObservableObject {
         print("📏 录制中调整摄像头大小为: \(size)")
         circularCameraWindow?.resizeWindow(to: size)
     }
+
+    private func handleCameraShapeChange(shape: CameraOverlayShape) {
+        guard recordingState.isRecording && recordingState.cameraOverlayEnabled else { return }
+
+        print("⬚ 录制中调整摄像头形状为: \(shape.displayName)")
+        circularCameraWindow?.updateShape(to: shape)
+    }
     
     @objc private func togglePopover() {
         guard let statusBarButton = statusItem.button else { return }
@@ -179,6 +194,7 @@ class StatusBarController: ObservableObject {
         Task {
             await permissionsManager?.checkAllPermissions()
         }
+        screenRecorder.getCameraManager().refreshCameraDevices()
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
         startDismissEventMonitoring()
         print("📋 显示状态栏菜单")
@@ -328,8 +344,8 @@ class StatusBarController: ObservableObject {
                     }
                     
                     // 如果启用了摄像头叠加，显示圆形摄像头窗口
-                    if recordingState.cameraOverlayEnabled,
-                       let cameraManager = screenRecorder.getCameraManager() {
+                    if recordingState.cameraOverlayEnabled {
+                        let cameraManager = screenRecorder.getCameraManager()
                         if circularCameraWindow == nil {
                             circularCameraWindow = CircularCameraWindow(cameraManager: cameraManager)
                         }
@@ -339,6 +355,7 @@ class StatusBarController: ObservableObject {
                         circularCameraWindow?.show(
                             at: recordingState.cameraOverlayPosition,
                             size: recordingState.cameraOverlaySize,
+                            shape: recordingState.cameraOverlayShape,
                             recordingRect: recordingRect
                         )
                     }
@@ -413,6 +430,7 @@ struct MenuBarView: View {
     @ObservedObject var recordingState: RecordingState
     var permissionsManager: PermissionsManager?
     @ObservedObject var audioManager: AudioManager
+    @ObservedObject var cameraManager: CameraManager
     
     let onStartRecording: () -> Void
     let onStopRecording: () -> Void
@@ -437,7 +455,7 @@ struct MenuBarView: View {
                         onSelectArea: onSelectArea
                     )
                     
-                    SettingsView(recordingState: recordingState, audioManager: audioManager)
+                    SettingsView(recordingState: recordingState, audioManager: audioManager, cameraManager: cameraManager)
                 }
                 .padding(.top, 14)
                 .padding(.horizontal, 12)
@@ -643,6 +661,7 @@ struct RecordingControlsView: View {
 struct SettingsView: View {
     @ObservedObject var recordingState: RecordingState
     @ObservedObject var audioManager: AudioManager
+    @ObservedObject var cameraManager: CameraManager
     
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -696,6 +715,43 @@ struct SettingsView: View {
             if recordingState.cameraOverlayEnabled {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 7) {
+                        Text("摄像头")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 48, alignment: .leading)
+
+                        Picker("", selection: $cameraManager.selectedCameraID) {
+                            if cameraManager.availableCameras.isEmpty {
+                                Text("无可用摄像头").tag("")
+                            } else {
+                                ForEach(cameraManager.availableCameras) { camera in
+                                    Text(camera.name).tag(camera.id)
+                                }
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .disabled(cameraManager.availableCameras.isEmpty || recordingState.isRecording)
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text("形状")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 48, alignment: .leading)
+
+                        Picker("", selection: $recordingState.cameraOverlayShape) {
+                            ForEach(CameraOverlayShape.allCases, id: \.self) { shape in
+                                Text(shape.displayName).tag(shape)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: .infinity)
+                    }
+
+                    HStack(spacing: 7) {
                         Text("位置")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -731,6 +787,9 @@ struct SettingsView: View {
             }
         }
         .menuSectionStyle()
+        .onAppear {
+            cameraManager.refreshCameraDevices()
+        }
     }
 }
 

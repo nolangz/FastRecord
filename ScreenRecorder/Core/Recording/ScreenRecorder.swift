@@ -33,7 +33,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var microphoneDeviceID: String? = nil
     
     // 摄像头叠加层
-    private var cameraManager: CameraManager?
+    private let cameraManager = CameraManager()
     private var enableCameraOverlay = false
     private var cameraOverlayPosition: CameraOverlayPosition = .topRight
     private var cameraOverlaySize: CameraOverlaySize = .medium
@@ -63,14 +63,10 @@ class ScreenRecorder: NSObject, ObservableObject {
         enableCameraOverlay = enabled
         cameraOverlayPosition = position
         cameraOverlaySize = size
-        
-        if enabled && cameraManager == nil {
-            cameraManager = CameraManager()
-        }
     }
     
     // MARK: - 获取摄像头管理器
-    func getCameraManager() -> CameraManager? {
+    func getCameraManager() -> CameraManager {
         return cameraManager
     }
     
@@ -99,14 +95,11 @@ class ScreenRecorder: NSObject, ObservableObject {
         
         // 启动摄像头（如果需要）
         if enableCameraOverlay {
-            if cameraManager == nil {
-                cameraManager = CameraManager()
-            }
             // 重新检查摄像头可用性（权限可能刚被授权）
-            cameraManager?.checkCameraAvailability()
+            cameraManager.refreshCameraDevices()
             // 等待一下让权限状态更新
             try await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            try await cameraManager?.startCapture()
+            try await cameraManager.startCapture()
         }
         
         switch mode {
@@ -140,7 +133,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         
         // 停止摄像头
-        cameraManager?.stopCapture()
+        cameraManager.stopCapture()
         
         // 完成视频写入
         await finishVideoWriting()

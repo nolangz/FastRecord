@@ -2,10 +2,17 @@ import Foundation
 import AVFoundation
 import CoreImage
 
+struct CameraDevice: Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
 @MainActor
 class CameraManager: NSObject, ObservableObject {
     @Published var isAvailable = false
     @Published var isCapturing = false
+    @Published var availableCameras: [CameraDevice] = []
+    @Published var selectedCameraID = ""
     
     private var captureSession: AVCaptureSession?
     private var videoDevice: AVCaptureDevice?
@@ -18,22 +25,34 @@ class CameraManager: NSObject, ObservableObject {
     
     override init() {
         super.init()
-        checkCameraAvailability()
+        refreshCameraDevices()
     }
     
     // MARK: - 检查摄像头可用性
     func checkCameraAvailability() {
-        Task { @MainActor in
-            let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
-            let hasCamera = !AVCaptureDevice.DiscoverySession(
-                deviceTypes: [.builtInWideAngleCamera],
-                mediaType: .video,
-                position: .front
-            ).devices.isEmpty
-            
-            isAvailable = (authStatus == .authorized) && hasCamera
-            print("📷 摄像头可用性: \(isAvailable) (权限: \(authStatus.rawValue), 设备: \(hasCamera))")
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        let hasCamera = !discoverCaptureDevices().isEmpty
+
+        isAvailable = (authStatus == .authorized) && hasCamera
+        print("📷 摄像头可用性: \(isAvailable) (权限: \(authStatus.rawValue), 设备: \(hasCamera))")
+    }
+
+    func refreshCameraDevices() {
+        let devices = discoverCaptureDevices()
+        availableCameras = devices.map { device in
+            CameraDevice(id: device.uniqueID, name: device.localizedName)
         }
+
+        if selectedCameraID.isEmpty || !availableCameras.contains(where: { $0.id == selectedCameraID }) {
+            selectedCameraID = availableCameras.first?.id ?? ""
+        }
+
+        checkCameraAvailability()
+        print("📷 找到 \(availableCameras.count) 个摄像头设备")
+    }
+
+    var selectedCameraName: String {
+        availableCameras.first(where: { $0.id == selectedCameraID })?.name ?? "无可用摄像头"
     }
     
     // MARK: - 开始摄像头捕获
@@ -55,13 +74,9 @@ class CameraManager: NSObject, ObservableObject {
             session.sessionPreset = .high
         }
         
-        // 获取前置摄像头
-        videoDevice = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInWideAngleCamera],
-            mediaType: .video,
-            position: .front
-        ).devices.first
-        
+        // 获取选中的摄像头
+        videoDevice = selectedCaptureDevice()
+
         guard let device = videoDevice else {
             throw CameraError.deviceNotFound
         }
@@ -99,7 +114,7 @@ class CameraManager: NSObject, ObservableObject {
         session.startRunning()
         
         isCapturing = true
-        print("✅ 摄像头捕获已启动")
+        print("✅ 摄像头捕获已启动: \(device.localizedName)")
     }
     
     // MARK: - 停止摄像头捕获
@@ -120,6 +135,42 @@ class CameraManager: NSObject, ObservableObject {
     // MARK: - 获取当前摄像头画面
     func getCurrentFrame() -> CVPixelBuffer? {
         return currentPixelBuffer
+    }
+
+    var currentFrameAspectRatio: CGFloat? {
+        guard let currentPixelBuffer else { return nil }
+
+        let width = CVPixelBufferGetWidth(currentPixelBuffer)
+        let height = CVPixelBufferGetHeight(currentPixelBuffer)
+
+        guard width > 0, height > 0 else { return nil }
+        return CGFloat(width) / CGFloat(height)
+    }
+
+    private func selectedCaptureDevice() -> AVCaptureDevice? {
+        let devices = discoverCaptureDevices()
+
+        if let device = devices.first(where: { $0.uniqueID == selectedCameraID }) {
+            return device
+        }
+
+        return devices.first(where: { $0.position == .front }) ?? devices.first
+    }
+
+    private func discoverCaptureDevices() -> [AVCaptureDevice] {
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+
+        if #available(macOS 14.0, *) {
+            deviceTypes = [.builtInWideAngleCamera, .external]
+        } else {
+            deviceTypes = [.builtInWideAngleCamera, .externalUnknown]
+        }
+
+        return AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .video,
+            position: .unspecified
+        ).devices
     }
     
     // MARK: - 创建圆形蒙版摄像头画面

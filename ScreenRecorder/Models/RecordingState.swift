@@ -56,6 +56,20 @@ enum CameraOverlaySize: CaseIterable {
     }
 }
 
+enum CameraOverlayShape: CaseIterable, Hashable {
+    case circle
+    case roundedSquare
+
+    var displayName: String {
+        switch self {
+        case .circle:
+            return "圆形"
+        case .roundedSquare:
+            return "圆角矩形"
+        }
+    }
+}
+
 @MainActor
 class RecordingState: ObservableObject {
     @Published var isRecording = false
@@ -70,6 +84,7 @@ class RecordingState: ObservableObject {
     @Published var cameraOverlayEnabled = true
     @Published var cameraOverlayPosition: CameraOverlayPosition = .topRight
     @Published var cameraOverlaySize: CameraOverlaySize = .medium
+    @Published var cameraOverlayShape: CameraOverlayShape = .circle
     
     // 输出设置
     @Published var outputDirectory = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
