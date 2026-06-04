@@ -362,7 +362,7 @@ struct CameraOverlayView: View {
         }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let cropRect = shape == .roundedSquare ? visibleContentRect(in: pixelBuffer, imageExtent: ciImage.extent) : ciImage.extent
+        let cropRect = visibleContentRect(in: pixelBuffer, imageExtent: ciImage.extent)
 
         if shape == .roundedSquare {
             let aspectRatio = cropRect.width / max(cropRect.height, 1)
@@ -395,7 +395,9 @@ struct CameraOverlayView: View {
 
         let horizontalTrim = detectedRect.minX + imageExtent.width - detectedRect.maxX
         let verticalTrim = detectedRect.minY + imageExtent.height - detectedRect.maxY
-        let hasMeaningfulTrim = horizontalTrim > imageExtent.width * 0.04 || verticalTrim > imageExtent.height * 0.04
+        let horizontalTrimThreshold = max(2, imageExtent.width * 0.005)
+        let verticalTrimThreshold = max(2, imageExtent.height * 0.005)
+        let hasMeaningfulTrim = horizontalTrim > horizontalTrimThreshold || verticalTrim > verticalTrimThreshold
 
         guard hasMeaningfulTrim else {
             return imageExtent
@@ -490,10 +492,10 @@ struct CameraOverlayView: View {
             return CGRect(x: 0, y: 0, width: width, height: height)
         }
 
-        let minX = max(0, left - sampleStep)
-        let minY = max(0, top - sampleStep)
-        let maxX = min(width, right + sampleStep + 1)
-        let maxY = min(height, bottom + sampleStep + 1)
+        let minX = max(0, left)
+        let minY = max(0, top)
+        let maxX = min(width, right + 1)
+        let maxY = min(height, bottom + 1)
 
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
