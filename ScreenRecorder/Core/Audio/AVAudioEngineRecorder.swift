@@ -29,6 +29,10 @@ class AVAudioEngineRecorder: NSObject {
     deinit {
         // 清理将在stopRecording方法中处理
     }
+
+    var currentInputFormat: AVAudioFormat? {
+        inputNode?.outputFormat(forBus: 0) ?? audioFormat
+    }
     
     // MARK: - 音频引擎设置
     private func setupAudioEngine() {
@@ -82,6 +86,7 @@ class AVAudioEngineRecorder: NSObject {
             
             if status == noErr {
                 print("✅ 已设置音频输入设备: \(deviceID)")
+                audioFormat = engine.inputNode.outputFormat(forBus: 0)
             } else {
                 print("❌ 设置音频输入设备失败: \(status)")
             }
@@ -106,6 +111,7 @@ class AVAudioEngineRecorder: NSObject {
         
         // 安装音频tap来捕获音频数据
         let format = inputNode.outputFormat(forBus: 0)
+        inputNode.removeTap(onBus: 0)
         
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
             guard let self = self, self.isRecording else { return }
@@ -192,7 +198,7 @@ class AVAudioEngineRecorder: NSObject {
             print("🎵 音频时间戳: \(String(format: "%.3f", seconds))秒, 样本数: \(sampleCount)")
         }
         
-        // 创建音频格式描述
+        // 创建音频格式描述，保持 AVAudioEngine 输出的真实格式。
         var formatDescription: CMAudioFormatDescription?
         var asbd = audioFormat.streamDescription.pointee
         let status = CMAudioFormatDescriptionCreate(
@@ -211,65 +217,45 @@ class AVAudioEngineRecorder: NSObject {
             return nil
         }
         
-        // 使用Data来管理内存，避免手动内存管理
         let frameCount = audioBuffer.frameLength
-        let channelCount = Int(audioFormat.channelCount)
-        
-        // 创建Data对象来存储音频数据
-        var audioData = Data()
-        
-        if let channelData = audioBuffer.floatChannelData {
-            // 交错音频数据到Data
-            audioData.reserveCapacity(Int(frameCount) * channelCount * MemoryLayout<Float>.size)
-            
-            for frame in 0..<Int(frameCount) {
-                for channel in 0..<channelCount {
-                    var sample = channelData[channel][frame]
-                    audioData.append(Data(bytes: &sample, count: MemoryLayout<Float>.size))
-                }
-            }
-        }
-        
-        // 创建CMBlockBuffer
-        var blockBuffer: CMBlockBuffer?
-        let blockStatus = audioData.withUnsafeBytes { dataPointer in
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: UnsafeMutableRawPointer(mutating: dataPointer.baseAddress),
-                blockLength: audioData.count,
-                blockAllocator: kCFAllocatorNull,  // 不需要释放，因为Data会管理
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: audioData.count,
-                flags: kCMBlockBufferAssureMemoryNowFlag,
-                blockBufferOut: &blockBuffer
-            )
-        }
-        
-        guard blockStatus == noErr, let block = blockBuffer else {
-            print("❌ 创建CMBlockBuffer失败: \(blockStatus)")
-            return nil
-        }
-        
-        // 创建CMSampleBuffer
         var sampleBuffer: CMSampleBuffer?
-        let duration = CMTime(
-            value: frameLength,
-            timescale: CMTimeScale(sampleRate)
+
+        var timingInfo = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
         )
-        
-        let sampleStatus = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+
+        let sampleStatus = CMSampleBufferCreate(
             allocator: kCFAllocatorDefault,
-            dataBuffer: block,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
             formatDescription: formatDesc,
             sampleCount: CMItemCount(frameCount),
-            presentationTimeStamp: presentationTime,
-            packetDescriptions: nil,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timingInfo,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
             sampleBufferOut: &sampleBuffer
         )
         
-        if sampleStatus != noErr {
+        guard sampleStatus == noErr, let sampleBuffer else {
             print("❌ 创建CMSampleBuffer失败: \(sampleStatus)")
+            return nil
+        }
+
+        let dataStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
+            sampleBuffer,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            bufferList: audioBuffer.audioBufferList
+        )
+
+        if dataStatus != noErr {
+            print("❌ 写入AudioBufferList失败: \(dataStatus)")
             return nil
         }
         

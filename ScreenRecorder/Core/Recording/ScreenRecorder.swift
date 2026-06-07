@@ -511,11 +511,23 @@ class ScreenRecorder: NSObject, ObservableObject {
     
     // MARK: - AVAudioEngine麦克风设置
     private func setupAVAudioEngineMicrophone(videoWriter: AVAssetWriter, deviceID: String?) throws {
+        let recorder = AVAudioEngineRecorder(enableVoiceProcessing: true)
+
+        // 设置音频设备
+        if let deviceID = deviceID,
+           let audioDeviceID = AudioDeviceID(deviceID) {
+            recorder.setInputDevice(deviceID: audioDeviceID)
+        }
+
+        let inputFormat = recorder.currentInputFormat
+        let sampleRate = inputFormat?.sampleRate ?? 44100
+        let channelCount = max(1, min(Int(inputFormat?.channelCount ?? 1), 2))
+
         // 配置麦克风音频输入
         let micSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channelCount,
             AVEncoderBitRateKey: 96000
         ]
         
@@ -531,17 +543,9 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         
         videoWriter.add(micInput)
+        avAudioEngineRecorder = recorder
         
-        // 创建并配置AVAudioEngine录制器
-        avAudioEngineRecorder = AVAudioEngineRecorder(enableVoiceProcessing: true)
-        
-        // 设置音频设备
-        if let deviceID = deviceID,
-           let audioDeviceID = AudioDeviceID(deviceID) {
-            avAudioEngineRecorder?.setInputDevice(deviceID: audioDeviceID)
-        }
-        
-        print("🎤 AVAudioEngine 麦克风录制已配置 (系统 AEC)")
+        print("🎤 AVAudioEngine 麦克风录制已配置 (系统 AEC): \(Int(sampleRate))Hz, \(channelCount)ch")
     }
     
     // MARK: - 视频写入器设置
