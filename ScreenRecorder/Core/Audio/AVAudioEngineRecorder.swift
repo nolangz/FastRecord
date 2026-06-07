@@ -17,11 +17,9 @@ class AVAudioEngineRecorder: NSObject {
     private var sampleCount: Int64 = 0  // 音频样本计数器
     private var firstSampleTime: AVAudioTime?  // 记录第一个样本的时间
     private var sessionStartTime: CMTime = .zero  // 录制会话开始时间
-    private let enableVoiceProcessing: Bool
     
     // MARK: - 初始化
-    init(enableVoiceProcessing: Bool = false) {
-        self.enableVoiceProcessing = enableVoiceProcessing
+    override init() {
         super.init()
         setupAudioEngine()
     }
@@ -38,15 +36,6 @@ class AVAudioEngineRecorder: NSObject {
         guard let inputNode = inputNode else {
             print("❌ 无法获取音频输入节点")
             return
-        }
-
-        if enableVoiceProcessing {
-            do {
-                try inputNode.setVoiceProcessingEnabled(true)
-                print("✅ 麦克风系统 Voice Processing/AEC 已启用")
-            } catch {
-                print("⚠️  麦克风系统 Voice Processing/AEC 启用失败，回退普通麦克风: \(error.localizedDescription)")
-            }
         }
         
         // 获取输入格式

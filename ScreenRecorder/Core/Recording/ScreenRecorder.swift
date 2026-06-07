@@ -190,9 +190,13 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         stream = nil
         
-        // 停止 AVAudioEngine 麦克风录制
-        avAudioEngineRecorder?.stopRecording()
-        avAudioEngineRecorder = nil
+        // 停止AVAudioEngine录制 (仅macOS 13-14)
+        if #available(macOS 15.0, *) {
+            // macOS 15+使用SCK，无需停止AVAudioEngine
+        } else {
+            avAudioEngineRecorder?.stopRecording()
+            avAudioEngineRecorder = nil
+        }
         
         // 停止独立摄像头视频轨，再关闭摄像头采集
         await stopCameraTrackRecording()
@@ -300,11 +304,12 @@ class ScreenRecorder: NSObject, ObservableObject {
         config.capturesAudio = self.systemAudioEnabled
         config.excludesCurrentProcessAudio = true  // 避免录制自己应用的声音
         
-        // 麦克风统一走 AVAudioEngine Voice Processing，启用系统 AEC。
-        // ScreenCaptureKit 的麦克风流没有 AEC 控制点，容易把扬声器声音录进 mic 轨。
+        // macOS 15+ 麦克风支持
         if #available(macOS 15.0, *) {
-            config.captureMicrophone = false
-            config.microphoneCaptureDeviceID = nil
+            config.captureMicrophone = self.microphoneEnabled
+            if let deviceID = self.microphoneDeviceID {
+                config.microphoneCaptureDeviceID = deviceID
+            }
         }
         
         if let window = window {
@@ -446,11 +451,15 @@ class ScreenRecorder: NSObject, ObservableObject {
             startCameraTrackRecording()
         }
         
-        // 启动 AVAudioEngine 麦克风录制，使用系统 Voice Processing/AEC。
-        if let avRecorder = avAudioEngineRecorder,
-           let micInput = microphoneWriterInput {
-            try avRecorder.startRecording(writerInput: micInput)
-            print("🎤 AVAudioEngine 开始录制麦克风 (AEC)")
+        // 启动AVAudioEngine麦克风录制 (仅macOS 13-14)
+        if #available(macOS 15.0, *) {
+            // macOS 15+使用SCK，无需额外启动AVAudioEngine
+        } else {
+            if let avRecorder = avAudioEngineRecorder,
+               let micInput = microphoneWriterInput {
+                try avRecorder.startRecording(writerInput: micInput)
+                print("🎤 AVAudioEngine开始录制麦克风")
+            }
         }
         
         print("📹 Stream配置完成 - 分辨率: \(config.width)x\(config.height)")
@@ -477,11 +486,19 @@ class ScreenRecorder: NSObject, ObservableObject {
         
         // 设置麦克风录制
         if microphoneEnabled {
-            try setupAVAudioEngineMicrophone(
-                videoWriter: videoWriter,
-                deviceID: microphoneDeviceID
-            )
-            print("✅ 麦克风录制已启用 (AVAudioEngine + 系统 AEC)")
+            if #available(macOS 15.0, *) {
+                // macOS 15+: 使用ScreenCaptureKit原生支持
+                try setupMicrophoneInput(videoWriter: videoWriter)
+                try stream?.addStreamOutput(self, type: .microphone, sampleHandlerQueue: DispatchQueue(label: "microphoneQueue"))
+                print("✅ 麦克风录制已启用 (SCK原生支持)")
+            } else {
+                // macOS 13-14: 使用AVAudioEngine
+                try setupAVAudioEngineMicrophone(
+                    videoWriter: videoWriter,
+                    deviceID: microphoneDeviceID
+                )
+                print("✅ 麦克风录制已启用 (AVAudioEngine兼容方案)")
+            }
         }
     }
     
@@ -515,8 +532,8 @@ class ScreenRecorder: NSObject, ObservableObject {
         let micSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 96000
+            AVNumberOfChannelsKey: 2,  // 立体声
+            AVEncoderBitRateKey: 128000
         ]
         
         microphoneWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: micSettings)
@@ -533,7 +550,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         videoWriter.add(micInput)
         
         // 创建并配置AVAudioEngine录制器
-        avAudioEngineRecorder = AVAudioEngineRecorder(enableVoiceProcessing: true)
+        avAudioEngineRecorder = AVAudioEngineRecorder()
         
         // 设置音频设备
         if let deviceID = deviceID,
@@ -541,7 +558,32 @@ class ScreenRecorder: NSObject, ObservableObject {
             avAudioEngineRecorder?.setInputDevice(deviceID: audioDeviceID)
         }
         
-        print("🎤 AVAudioEngine 麦克风录制已配置 (系统 AEC)")
+        print("🎤 AVAudioEngine麦克风录制已配置")
+    }
+    
+    @available(macOS 15.0, *)
+    private func setupMicrophoneInput(videoWriter: AVAssetWriter) throws {
+        // 配置麦克风音频输入（独立轨道）
+        let micSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1,  // 麦克风通常是单声道
+            AVEncoderBitRateKey: 64000
+        ]
+        
+        microphoneWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: micSettings)
+        microphoneWriterInput?.expectsMediaDataInRealTime = true
+        
+        guard let micInput = microphoneWriterInput else {
+            throw RecordingError.audioSetupFailed
+        }
+        
+        guard videoWriter.canAdd(micInput) else {
+            throw RecordingError.audioSetupFailed
+        }
+        
+        videoWriter.add(micInput)
+        print("🎤 SCK麦克风输入已配置")
     }
     
     // MARK: - 视频写入器设置

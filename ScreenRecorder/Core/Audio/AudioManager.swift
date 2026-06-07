@@ -23,6 +23,14 @@ class AudioManager: ObservableObject {
     @Published var selectedMicrophone: AudioDevice = AudioDevice.defaultDevice
     @Published var isLoading = false
     
+    // macOS版本检查
+    private var supportsSCKMicrophone: Bool {
+        if #available(macOS 15.0, *) {
+            return true
+        }
+        return false
+    }
+    
     init() {
         print("🎤 初始化音频管理器...")
         Task {
@@ -205,17 +213,25 @@ class AudioManager: ObservableObject {
     
     // MARK: - macOS版本适配
     func getRecommendedAudioConfiguration() -> AudioConfiguration {
-        AudioConfiguration(
-            method: .avAudioEngine,
-            description: "使用系统 Voice Processing/AEC 抑制回声"
-        )
+        if supportsSCKMicrophone {
+            return AudioConfiguration(
+                method: .screenCaptureKit,
+                description: "使用 ScreenCaptureKit 原生麦克风支持 (macOS 15+)"
+            )
+        } else {
+            return AudioConfiguration(
+                method: .avAudioEngine,
+                description: "使用 AVAudioEngine 兼容方案 (macOS 13-14)"
+            )
+        }
     }
 }
 
 // MARK: - 音频配置模型
 struct AudioConfiguration {
     enum Method {
-        case avAudioEngine
+        case screenCaptureKit  // macOS 15+
+        case avAudioEngine     // macOS 13-14 兼容
     }
     
     let method: Method
