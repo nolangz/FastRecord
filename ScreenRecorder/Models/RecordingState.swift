@@ -1,11 +1,27 @@
+import CoreGraphics
 import Foundation
 
 // MARK: - 导入音频相关模块
 // 注意：AudioManager会在后续集成时导入
 
+struct WindowRecordingTarget {
+    let windowID: CGWindowID
+    let frame: CGRect
+    let title: String
+    let ownerName: String
+
+    var displayName: String {
+        if title.isEmpty {
+            return ownerName
+        }
+        return "\(ownerName) - \(title)"
+    }
+}
+
 enum RecordingMode {
     case fullScreen
     case selectedArea(CGRect)
+    case selectedWindow(WindowRecordingTarget)
 }
 
 enum CameraOverlayPosition: CaseIterable, Hashable {
@@ -110,6 +126,8 @@ class RecordingState: ObservableObject {
             return "ScreenRecord_\(timestamp).mov"
         case .selectedArea(_):
             return "AreaRecord_\(timestamp).mov"
+        case .selectedWindow(_):
+            return "WindowRecord_\(timestamp).mov"
         }
     }
     

@@ -40,6 +40,12 @@ private struct CodableRect: Codable, Equatable {
     }
 }
 
+private extension CGRect {
+    var area: CGFloat {
+        max(width, 0) * max(height, 0)
+    }
+}
+
 @MainActor
 class ScreenRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
@@ -64,6 +70,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var outputURL: URL?
     private var recordingRect: CGRect?
     private var isFullScreen: Bool = true
+    private var recordingModeName: String = "fullScreen"
     
     // 音频录制配置
     private var systemAudioEnabled: Bool = false
@@ -164,6 +171,8 @@ class ScreenRecorder: NSObject, ObservableObject {
             try await startFullScreenRecording()
         case .selectedArea(let rect):
             try await startAreaRecording(rect: rect)
+        case .selectedWindow(let target):
+            try await startWindowRecording(target: target)
         }
         
         isRecording = true
@@ -214,6 +223,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         
         isFullScreen = true
+        recordingModeName = "fullScreen"
         recordingRect = display.frame
         
         try await setupStreamAndWriter(for: display, rect: nil)
@@ -229,6 +239,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         
         isFullScreen = false
+        recordingModeName = "selectedArea"
         recordingRect = rect
         
         // 保存选择的区域到UserDefaults
@@ -236,9 +247,46 @@ class ScreenRecorder: NSObject, ObservableObject {
         
         try await setupStreamAndWriter(for: display, rect: rect)
     }
+
+    // MARK: - 窗口录制
+    private func startWindowRecording(target: WindowRecordingTarget) async throws {
+        print("🪟 开始窗口录制: \(target.displayName), id: \(target.windowID), frame: \(target.frame)")
+
+        let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = displayContaining(target.frame, in: availableContent.displays) ?? availableContent.displays.first else {
+            throw RecordingError.noDisplayFound
+        }
+        guard let window = availableContent.windows.first(where: { $0.windowID == target.windowID }) else {
+            throw RecordingError.noWindowFound
+        }
+
+        isFullScreen = false
+        recordingModeName = "selectedWindow"
+        recordingRect = target.frame
+
+        try await setupStreamAndWriter(for: display, rect: nil, window: window)
+    }
+
+    private func displayContaining(_ rect: CGRect, in displays: [SCDisplay]) -> SCDisplay? {
+        displays.max { first, second in
+            first.frame.intersection(rect).area < second.frame.intersection(rect).area
+        }
+    }
+
+    private func backingScaleFactor(for rect: CGRect?) -> CGFloat {
+        guard let rect else {
+            return NSScreen.main?.backingScaleFactor ?? 1.0
+        }
+
+        return NSScreen.screens
+            .max { first, second in
+                first.frame.intersection(rect).area < second.frame.intersection(rect).area
+            }?
+            .backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1.0
+    }
     
     // MARK: - Stream 和 Writer 设置
-    private func setupStreamAndWriter(for display: SCDisplay, rect: CGRect?) async throws {
+    private func setupStreamAndWriter(for display: SCDisplay, rect: CGRect?, window: SCWindow? = nil) async throws {
         guard let outputURL = outputURL else {
             throw RecordingError.invalidOutputURL
         }
@@ -264,9 +312,27 @@ class ScreenRecorder: NSObject, ObservableObject {
             }
         }
         
-        if let rect = rect {
+        if let window = window {
+            let targetRect = recordingRect ?? window.frame
+            let scaleFactor = backingScaleFactor(for: targetRect)
+            let pixelWidth = round(targetRect.width * scaleFactor)
+            let pixelHeight = round(targetRect.height * scaleFactor)
+            let alignedWidth = max(2, Int(pixelWidth / 2) * 2)
+            let alignedHeight = max(2, Int(pixelHeight / 2) * 2)
+
+            config.width = alignedWidth
+            config.height = alignedHeight
+            config.scalesToFit = false
+            config.queueDepth = 5
+            config.colorSpaceName = CGColorSpace.displayP3
+
+            print("🪟 窗口录制配置:")
+            print("   目标窗口: \(targetRect)")
+            print("   缩放因子: \(scaleFactor)")
+            print("   输出分辨率: \(alignedWidth)x\(alignedHeight)")
+        } else if let rect = rect {
             // 🎯 区域录制配置 - 像素对齐优化
-            let scaleFactor = NSScreen.main?.backingScaleFactor ?? 1.0
+            let scaleFactor = backingScaleFactor(for: rect)
             
             // 1. 像素对齐：确保所有坐标都是整数像素
             let pixelX = round(rect.origin.x * scaleFactor)
@@ -344,7 +410,12 @@ class ScreenRecorder: NSObject, ObservableObject {
         }
         
         // 设置录制内容过滤器
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let filter: SCContentFilter
+        if let window = window {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+        } else {
+            filter = SCContentFilter(display: display, excludingWindows: [])
+        }
         
         // 创建并配置stream
         stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -856,7 +927,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             cameraFile: cameraOutputURL?.lastPathComponent,
             coordinateSpace: "macOS global screen points; origin is bottom-left",
             generatedAt: ISO8601DateFormatter().string(from: Date()),
-            recordingMode: isFullScreen ? "fullScreen" : "selectedArea",
+            recordingMode: recordingModeName,
             recordingRect: recordingRect.map(CodableRect.init),
             samples: overlayMetadataSamples
         )
@@ -1648,6 +1719,7 @@ extension ScreenRecorder {
 enum RecordingError: Error, LocalizedError {
     case invalidState
     case noDisplayFound
+    case noWindowFound
     case invalidOutputURL
     case writerSetupFailed
     case writerNotFound
@@ -1660,6 +1732,8 @@ enum RecordingError: Error, LocalizedError {
             return "录制状态无效"
         case .noDisplayFound:
             return "未找到可录制的显示器"
+        case .noWindowFound:
+            return "未找到可录制的窗口"
         case .invalidOutputURL:
             return "输出文件路径无效"
         case .writerSetupFailed:

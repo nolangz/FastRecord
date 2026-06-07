@@ -10,6 +10,7 @@ class StatusBarController: ObservableObject {
     private var recordingState: RecordingState
     private var recordingTimer: Timer?
     private var areaSelector: AreaSelector
+    private var windowSelector: WindowSelector
     private var screenRecorder: ScreenRecorder
     private var circularCameraWindow: CircularCameraWindow?
     private var recordingIndicator: RecordingIndicatorWindow?
@@ -31,6 +32,7 @@ class StatusBarController: ObservableObject {
         popover = NSPopover()
         recordingState = RecordingState()
         areaSelector = AreaSelector()
+        windowSelector = WindowSelector()
         screenRecorder = ScreenRecorder()
         recordingIndicator = RecordingIndicatorWindow()
         audioManager = AudioManager()
@@ -76,6 +78,9 @@ class StatusBarController: ObservableObject {
                 },
                 onSelectArea: { [weak self] in
                     self?.selectRecordingArea()
+                },
+                onSelectWindow: { [weak self] in
+                    self?.selectRecordingWindow()
                 }
             )
         )
@@ -148,7 +153,7 @@ class StatusBarController: ObservableObject {
                         circularCameraWindow = CircularCameraWindow(cameraManager: cameraManager)
                     }
 
-                    let recordingRect: CGRect? = if case .selectedArea(let rect) = recordingState.recordingMode { rect } else { nil }
+                    let recordingRect = currentRecordingFrame()
 
                     circularCameraWindow?.show(
                         at: recordingState.cameraOverlayPosition,
@@ -354,7 +359,7 @@ class StatusBarController: ObservableObject {
                             circularCameraWindow = CircularCameraWindow(cameraManager: cameraManager)
                         }
                         
-                        let recordingRect: CGRect? = if case .selectedArea(let rect) = recordingState.recordingMode { rect } else { nil }
+                        let recordingRect = currentRecordingFrame()
                         
                         circularCameraWindow?.show(
                             at: recordingState.cameraOverlayPosition,
@@ -413,6 +418,35 @@ class StatusBarController: ObservableObject {
             self.startRecording()
         }
     }
+
+    private func selectRecordingWindow() {
+        print("🪟 选择录制窗口...")
+        hidePopover()
+
+        windowSelector.selectWindow { [weak self] selectedWindow in
+            guard let self = self, let target = selectedWindow else {
+                print("❌ 窗口选择被取消")
+                return
+            }
+
+            print("✅ 选择了录制窗口: \(target.displayName)")
+            self.recordingState.recordingMode = .selectedWindow(target)
+            self.recordingState.selectedArea = target.frame
+
+            self.startRecording()
+        }
+    }
+
+    private func currentRecordingFrame() -> CGRect? {
+        switch recordingState.recordingMode {
+        case .fullScreen:
+            return nil
+        case .selectedArea(let rect):
+            return rect
+        case .selectedWindow(let target):
+            return target.frame
+        }
+    }
     
     // MARK: - 录制计时器
     private func startRecordingTimer() {
@@ -439,6 +473,7 @@ struct MenuBarView: View {
     let onStartRecording: () -> Void
     let onStopRecording: () -> Void
     let onSelectArea: () -> Void
+    let onSelectWindow: () -> Void
     
     var body: some View {
         VStack(spacing: 0) {
@@ -456,7 +491,8 @@ struct MenuBarView: View {
                         recordingState: recordingState,
                         onStartRecording: onStartRecording,
                         onStopRecording: onStopRecording,
-                        onSelectArea: onSelectArea
+                        onSelectArea: onSelectArea,
+                        onSelectWindow: onSelectWindow
                     )
                     
                     SettingsView(recordingState: recordingState, audioManager: audioManager, cameraManager: cameraManager)
@@ -627,6 +663,7 @@ struct RecordingControlsView: View {
     let onStartRecording: () -> Void
     let onStopRecording: () -> Void
     let onSelectArea: () -> Void
+    let onSelectWindow: () -> Void
     
     var body: some View {
         if recordingState.isRecording {
@@ -644,7 +681,7 @@ struct RecordingControlsView: View {
                     recordingState.recordingMode = .fullScreen
                     onStartRecording()
                 } label: {
-                    Label("全屏录制", systemImage: "display")
+                    Label("全屏", systemImage: "display")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -652,7 +689,15 @@ struct RecordingControlsView: View {
                 Button {
                     onSelectArea()
                 } label: {
-                    Label("选择区域", systemImage: "crop")
+                    Label("区域", systemImage: "crop")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    onSelectWindow()
+                } label: {
+                    Label("窗口", systemImage: "macwindow")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
