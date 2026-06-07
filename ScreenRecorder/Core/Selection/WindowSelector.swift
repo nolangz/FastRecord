@@ -6,6 +6,9 @@ final class WindowSelector: NSObject {
     private var overlayWindow: NSWindow?
     private var selectionView: WindowSelectionView?
     private var completion: ((WindowRecordingTarget?) -> Void)?
+    private var candidates: [WindowRecordingTarget] = []
+    private var localKeyMonitor: Any?
+    private var globalKeyMonitor: Any?
 
     func selectWindow(completion: @escaping (WindowRecordingTarget?) -> Void) {
         print("🪟 启动窗口选择...")
@@ -18,7 +21,10 @@ final class WindowSelector: NSObject {
         }
 
         let screenFrame = screen.frame
-        let overlayWindow = NSWindow(
+        candidates = loadCandidateWindows(on: screen)
+        print("🪟 可选择窗口数量: \(candidates.count)")
+
+        let overlayWindow = WindowSelectionOverlayWindow(
             contentRect: screenFrame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -29,12 +35,14 @@ final class WindowSelector: NSObject {
         overlayWindow.isOpaque = false
         overlayWindow.level = .screenSaver + 1
         overlayWindow.ignoresMouseEvents = false
+        overlayWindow.acceptsMouseMovedEvents = true
         overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let selectionView = WindowSelectionView(
             frame: CGRect(origin: .zero, size: screenFrame.size),
             screenFrame: screenFrame
         )
+        selectionView.autoresizingMask = [.width, .height]
         selectionView.windowProvider = { [weak self] point in
             self?.window(at: point, on: screen)
         }
@@ -49,19 +57,59 @@ final class WindowSelector: NSObject {
 
         self.overlayWindow = overlayWindow
         self.selectionView = selectionView
+        startEscapeMonitoring()
 
         print("✅ 窗口选择界面已显示")
     }
 
     private func finishSelection(target: WindowRecordingTarget?) {
+        guard overlayWindow != nil || completion != nil else { return }
+
         print("🪟 窗口选择完成: \(target?.displayName ?? "已取消")")
 
+        stopEscapeMonitoring()
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
         selectionView = nil
+        candidates = []
 
         completion?(target)
         completion = nil
+    }
+
+    private func startEscapeMonitoring() {
+        stopEscapeMonitoring()
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {
+                Task { @MainActor in
+                    self?.finishSelection(target: nil)
+                }
+                return nil
+            }
+
+            return event
+        }
+
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {
+                Task { @MainActor in
+                    self?.finishSelection(target: nil)
+                }
+            }
+        }
+    }
+
+    private func stopEscapeMonitoring() {
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+            self.localKeyMonitor = nil
+        }
+
+        if let globalKeyMonitor {
+            NSEvent.removeMonitor(globalKeyMonitor)
+            self.globalKeyMonitor = nil
+        }
     }
 
     private func screenWithMouse() -> NSScreen? {
@@ -72,12 +120,12 @@ final class WindowSelector: NSObject {
     }
 
     private func window(at point: CGPoint, on screen: NSScreen) -> WindowRecordingTarget? {
-        candidateWindows(on: screen).first { target in
+        candidates.first { target in
             target.frame.contains(point)
         }
     }
 
-    private func candidateWindows(on screen: NSScreen) -> [WindowRecordingTarget] {
+    private func loadCandidateWindows(on screen: NSScreen) -> [WindowRecordingTarget] {
         guard let windowInfoList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
@@ -127,14 +175,19 @@ final class WindowSelector: NSObject {
     }
 
     private func appKitRect(fromCGWindowBounds bounds: CGRect) -> CGRect {
-        let globalMaxY = NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
+        let primaryDisplayMaxY = NSScreen.screens.first?.frame.maxY ?? NSScreen.main?.frame.maxY ?? 0
         return CGRect(
             x: bounds.origin.x,
-            y: globalMaxY - bounds.origin.y - bounds.height,
+            y: primaryDisplayMaxY - bounds.origin.y - bounds.height,
             width: bounds.width,
             height: bounds.height
         )
     }
+}
+
+private final class WindowSelectionOverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 private final class WindowSelectionView: NSView {
@@ -142,6 +195,7 @@ private final class WindowSelectionView: NSView {
     var windowProvider: ((CGPoint) -> WindowRecordingTarget?)?
     var onSelect: ((WindowRecordingTarget?) -> Void)?
 
+    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
     private var trackingArea: NSTrackingArea?
     private var hoveredWindow: WindowRecordingTarget? {
         didSet {
@@ -155,6 +209,7 @@ private final class WindowSelectionView: NSView {
         self.screenFrame = screenFrame
         super.init(frame: frameRect)
         wantsLayer = true
+        setupCancelButton()
     }
 
     required init?(coder: NSCoder) {
@@ -187,7 +242,7 @@ private final class WindowSelectionView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateHover()
+        updateHover(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -195,6 +250,7 @@ private final class WindowSelectionView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        updateHover(with: event)
         if let hoveredWindow {
             onSelect?(hoveredWindow)
         }
@@ -242,8 +298,37 @@ private final class WindowSelectionView: NSView {
         hoveredWindow = windowProvider?(NSEvent.mouseLocation)
     }
 
+    private func updateHover(with event: NSEvent) {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        let globalPoint = CGPoint(
+            x: localPoint.x + screenFrame.minX,
+            y: localPoint.y + screenFrame.minY
+        )
+        hoveredWindow = windowProvider?(globalPoint)
+    }
+
+    private func setupCancelButton() {
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelSelection)
+        cancelButton.bezelStyle = .rounded
+        cancelButton.controlSize = .regular
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(cancelButton)
+
+        NSLayoutConstraint.activate([
+            cancelButton.topAnchor.constraint(equalTo: topAnchor, constant: 52),
+            cancelButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -52),
+            cancelButton.widthAnchor.constraint(equalToConstant: 72)
+        ])
+    }
+
+    @objc private func cancelSelection() {
+        onSelect?(nil)
+    }
+
     private func drawInstruction() {
-        let text = "点击窗口开始录制，按 ESC 取消"
+        let text = "点击窗口开始录制，按 ESC 或右键取消"
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
             .foregroundColor: NSColor.white
